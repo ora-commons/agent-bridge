@@ -72,7 +72,7 @@ between the title line and the first blank line. The text under `## Body` is
 never looked at by any parser here. That is not a promise about intent; it is
 where the code stops reading. Prose that looks like a header stays prose.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

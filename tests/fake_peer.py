@@ -34,7 +34,7 @@ It imports nothing outside the standard library, touches nothing except the
 input it is given, the file it is told to write its process ids into, and the
 output streams it is handed. It never sleeps without a bound.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 import os

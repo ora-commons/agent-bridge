@@ -53,7 +53,7 @@ them: where the program is, `codex --version`, `codex login status`, and
 than from the words, because Codex prints `Logged in using ChatGPT` on the error
 stream along with everything else it has to say about itself.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

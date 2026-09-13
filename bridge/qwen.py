@@ -8,7 +8,7 @@ and disabling compatible usage statistics and telemetry for this child. Qwen
 alone may preprocess the unchanged body before the model; that exception is
 reported explicitly rather than hidden behind the later zero-tool-call budget.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

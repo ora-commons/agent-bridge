@@ -28,7 +28,7 @@ Finally it holds the two small fixed shapes the rest of the code passes around:
 what a connector claims to have been tested against, and what one bounded call
 to a peer program consists of.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

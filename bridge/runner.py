@@ -5,7 +5,7 @@ request. It then starts one fresh target process, publishes one final textual
 answer, and exits. A failed target leaves the truthful request and no invented
 response. There is no retry or implicit history.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

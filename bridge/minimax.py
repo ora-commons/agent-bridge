@@ -5,7 +5,7 @@ headless permission mode that confines its tools. Agent Bridge therefore gives
 it only a task-owned neutral directory and reports the remaining tool and
 configuration authority instead of presenting ``smart`` as a sandbox.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

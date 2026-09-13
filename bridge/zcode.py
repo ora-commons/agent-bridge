@@ -137,7 +137,7 @@ at its documented place, `--version`, `--help`, `version` with the switches the
 turn relies on, `plugins list --json`, and the modification times of two files.
 No model turn among them.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

@@ -5,7 +5,7 @@
 that session or writes a neutral note. Substantive Markdown always arrives on
 standard input.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

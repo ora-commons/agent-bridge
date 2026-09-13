@@ -1,7 +1,7 @@
 ---
 name: agent-bridge
 description: "Use Agent Bridge from Hermes Agent to send one Markdown message to a supported target, report readiness, or add a neutral session note."
-license: Unlicense
+license: CC0-1.0
 platforms: [macos]
 metadata:
   hermes:
@@ -67,11 +67,15 @@ Before the first command, resolve one absolute Bridge root:
 1. Use `AGENT_BRIDGE_HOME` when the user has set it.
 2. Otherwise use the repository above this skill when this file is still
    inside an Agent Bridge checkout.
-3. Otherwise use `/Users/<user>/agent-bridge` when it exists.
+3. Otherwise use an absolute checkout path the user already supplied.
 
 The root must contain `bridge/__main__.py` and `bridge/cli.py`. If none of those
 locations qualifies, ask for the checkout's absolute path. Never search other
 adapters or guess from a directory name.
+
+This skill is guidance, not an installer: the source checkout is the Bridge
+installation, and there is no `agent-bridge` console command. Do not change
+Bridge or a vendor CLI during a call; follow the README and preserve records.
 
 Run every command below with that directory as the terminal working directory.
 Start it as the fixed argument vector beginning `python3 -m bridge`; do not
