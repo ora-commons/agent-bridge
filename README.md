@@ -61,6 +61,27 @@ does not install a console command or adapter; do not assume an installed
 `agent-bridge` executable. The commands below require the Release 1 source
 described here, not an earlier checkout.
 
+That checkout is the complete Bridge installation and is usable without Vibe,
+Programming Loop, Gear, or any harness skill. To update a clean Git checkout,
+first let every Bridge command using it exit, then run:
+
+```sh
+git -C /absolute/path/to/agent-bridge pull --ff-only
+```
+
+Do not use that command to overwrite local edits. Repeat `check` for the
+selected target before the next call. A copied harness skill is separate from
+the runtime: replace it from the same accepted revision through the host's
+normal skill-management mechanism. Bridge does not synchronize installed
+copies.
+
+To remove Bridge, first let every command using the checkout exit, then remove
+only that checkout and any optional harness-skill copies installed from it.
+Removing Bridge does not remove a vendor CLI, sign out of a vendor account,
+change vendor configuration, or delete session directories elsewhere. Keep or
+remove `$HOME/.agent-bridge/sessions` separately according to whether their
+human-readable records are still needed.
+
 ## First call from a checkout
 
 From the absolute checkout root, check your target without a model turn (Codex here):
@@ -165,6 +186,57 @@ Use the same subprocess pattern for session creation and notes, adding
 exit 0. Target and project come only from the session, not `run` arguments. A UI
 displaying live warnings should drain both streams while keeping the process attached.
 
+## Adding an initiating host or a target
+
+These are deliberately different changes.
+
+### Add an initiating host
+
+An initiating host is a caller. It needs documentation, a skill, or a launcher
+that starts the existing fixed `python3 -m bridge ...` vectors from an absolute
+source checkout. It does not need a Bridge connector, target registration, or
+runtime release. Give it an inert initiator label; let the user select one of
+the six literal targets; pass the complete Markdown body on standard input;
+keep both output streams and the exit status distinct; read a response file
+only after exit 0; and leave the foreground call attached through cleanup.
+
+For example, Vibe Coder can create a session labeled `vibe-coder`, store the
+user-selected target in that session, and pass its complete prepared handoff to
+`run`. Bridge records and delivers that one handoff. Vibe still owns project
+selection, approvals, lifecycle state, retry decisions, and interpretation of
+the returned text. No `vibe-coder` branch belongs in Bridge.
+
+Before describing a new initiating adapter as tested, use a disposable session
+and fake target to show that it preserves the complete body, selects only the
+named target, surfaces readiness and every warning, honors nonzero failure,
+reads the full saved response, can add a neutral note, and leaves no owned
+process. This is caller evidence; it is not target or model qualification.
+
+### Add a target
+
+A target is a program Bridge is willing to start. Adding one is a bounded
+runtime change, not an entry in a registry:
+
+1. Add one connector module under `bridge/` for the official CLI.
+2. Add the identifier literally to `HARNESS_IDS`, the explicit `_switch`, and
+   `is_courier_only` when the target must not receive a project.
+3. Implement the connector's existing `check` and `build_command` surface. Use
+   a fixed argument vector without a shell, prefer standard input, extract only
+   the final response, and choose the strongest practical vendor restrictions.
+4. Declare exact qualification evidence and concrete non-blocking warnings.
+   Fail before publication when software, authentication evidence, transport,
+   response extraction, required switches, or foreground control is unusable.
+5. Extend the existing focused fake-process and adapter evidence for request,
+   response, note, failure, timeout, atomic publication, unselected-target
+   inertness, and cleanup. Update this guide, the interface, and any initiating
+   skills that should offer the new literal identifier.
+
+A separately authorized disposable real call on the named CLI version and
+platform is required before claiming that target combination was exercised.
+An implemented route without that call may be published as untested, but not
+as demonstrated. Do not add dynamic discovery, a generated connector, SDK,
+provider fallback, automatic target choice, or all-pairs qualification.
+
 ## Safety and warnings
 
 Call only vendor CLIs you trust. Each is a program running under your own
@@ -229,7 +301,9 @@ Application workflows, including Programming Loop, stay with the caller.
 
 ## License
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 
-This is free and unencumbered software released into the public domain. See
-[UNLICENSE](UNLICENSE).
+First-party Agent Bridge material is dedicated to the public domain under
+[CC0 1.0 Universal](LICENSE). Third-party command-line programs, services,
+accounts, trademarks, configurations, and transcripts are not included in
+that dedication; see [NOTICE](NOTICE).

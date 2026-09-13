@@ -3,7 +3,7 @@
 Native packages start Agent Bridge exactly this way - as a fixed argument
 vector, with no shell and no installed console script to depend on.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 import sys

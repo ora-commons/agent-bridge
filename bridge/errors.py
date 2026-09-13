@@ -11,7 +11,7 @@ of their own. Only the runner turns a member into words, using `render()` below,
 so every failure reaches a person the same way: what happened, and the one thing
 to do next.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

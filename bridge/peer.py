@@ -74,7 +74,7 @@ The deadline covers the useful work: prechecks, the call and the answer. Cleanup
 afterwards gets its own separate bounded grace, because a deadline that has
 already run out cannot be used to decide how long to wait for a process to die.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

@@ -5,7 +5,7 @@ command-line interfaces. This module exposes the source release and on-disk
 session-format versions. It imports nothing, spawns nothing, and does no work
 when it is imported.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 #: Version of the on-disk session record format. `SESSION.md` records it as

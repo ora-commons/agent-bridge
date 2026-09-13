@@ -8,7 +8,7 @@ with the repository's fake peer, including one unregistered initiator label.
 ``qualify`` uses one disposable repository and one real call to prove one
 literal target's production restriction vector, transport, and cleanup.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

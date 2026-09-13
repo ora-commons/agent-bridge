@@ -20,7 +20,7 @@ part of the session record.
 Contention is not an error to work around. It means another turn is busy, so the
 answer is `BUSY_SESSION`, immediately, having changed nothing.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

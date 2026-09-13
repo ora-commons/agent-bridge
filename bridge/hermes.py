@@ -97,7 +97,7 @@ them: where the program is, `hermes --version`, `hermes portal info`, and
 info` exits 0 whether or not anyone is signed in and has no machine-readable
 form; what is looked for is written down once below.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

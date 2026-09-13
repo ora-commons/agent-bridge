@@ -56,7 +56,7 @@ are the forced publication outcomes, which cannot be produced on demand any
 other way and are made to happen by breaking, or by interrupting, the rename and
 the flush that follows it, for the length of one call.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

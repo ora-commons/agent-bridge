@@ -4,7 +4,7 @@ This is the only local writer besides the runner. Both record kinds use the
 same validation, session lock, sequence allocation, envelopes, and atomic
 publication as a target call. The Markdown body remains inert application text.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations

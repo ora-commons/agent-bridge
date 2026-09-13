@@ -4,7 +4,7 @@
 
 This is the controlling boundary for the shared runner, six target connectors, and thin initiating adapters. It replaces the former exactly-four-target rule and the former rule that incomplete confinement stopped release.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 
 ---
 
@@ -69,6 +69,12 @@ Any application or harness may initiate. It supplies one inert ASCII slug beginn
 The label appears in `SESSION.md` and message headers. It is not authentication, authority, routing, discovery, registration, or proof that the initiator is callable. Examples include `ora`, `gear-3`, `vibe-coder`, `codex`, and `my-app`.
 
 Supporting another initiator never requires a Bridge code change or release.
+The initiator starts the existing fixed command vectors from the checkout root,
+supplies complete Markdown through standard input, keeps standard output,
+standard error, and exit status distinct, and reads a response only after exit
+0. For example, Vibe Coder may use `vibe-coder` as the label and pass its
+prepared handoff to a user-selected existing target. Vibe's lifecycle and
+approval behavior remain Vibe's; no `vibe-coder` connector belongs here.
 
 ### Callable targets
 
@@ -356,7 +362,43 @@ The adapter owns its UI, target-selection policy, multi-target work, context ass
 
 The six harness packages expose courier, readiness, and neutral-record entry points through host conventions. They contain no planning, Programming Loop, or review product, never find or call each other, and invoke the one shared Bridge.
 
-A target-only harness needs no Bridge package—only its official CLI, vendor sign-in, and a qualified connector. Adding an application needs no registration, connector, generated package, or Bridge release. Adding a target requires a stable official CLI, hand-written literal connector, qualification, focused checks, and current documentation.
+### Adding an initiating host
+
+To be a target, a harness itself needs no Bridge adapter package. Its official
+CLI and vendor sign-in must exist where Bridge runs, and Bridge must have a
+qualified connector. A host that will initiate Bridge needs only documentation,
+a skill, or a launcher implementing the six adapter steps above. It must use
+the source checkout as the runtime, leave target choice with the caller, pass
+the complete body, surface warnings and failures, retain the saved response,
+and wait for cleanup. It must not add a target branch, register itself, or make
+its application state part of Format 2.
+
+Focused initiating-host evidence uses a disposable session and fake target. It
+shows exact body preservation, one selected target, readiness and warning
+presentation, nonzero failure, complete response retrieval, neutral notes, and
+no surviving process. This does not qualify a vendor CLI or model.
+
+### Adding a target
+
+A new target requires one hand-written connector module and literal edits to
+`HARNESS_IDS` and `_switch`; add it to `is_courier_only` when it cannot receive
+a project. The connector implements the existing `check` and `build_command`
+surface with an official stable CLI, a fixed no-shell vector, standard-input
+transport where the CLI supports it, exact final-response extraction, the
+strongest practical restrictions, and specific residual warnings. It neither
+selects a model/provider nor installs, signs in, retries, or falls back.
+
+Focused target evidence must cover the fixed Format 2 request, response, and
+note records; immutable session identity; literal dispatch; every unselected
+connector remaining inert; warning and failure reporting; timeout,
+publication, and process cleanup; and every initiating adapter that offers the
+new identifier. Qualification declarations name only the CLI versions and
+platforms actually exercised. Without a separately authorized disposable real
+call, the connector may be described as implemented and untested, never tested.
+
+This procedure is intentionally not a registry, generator, SDK, marketplace,
+discovery engine, provider fallback, automatic target selector, or all-pairs
+test requirement.
 
 ---
 

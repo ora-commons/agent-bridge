@@ -67,7 +67,7 @@ at: being signed in is required, and how - by subscription rather than by an API
 key - is reported as an observed fact and gates nothing, because choosing
 providers is not this project's business.
 
-SPDX-License-Identifier: Unlicense
+SPDX-License-Identifier: CC0-1.0
 """
 
 from __future__ import annotations
