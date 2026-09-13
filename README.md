@@ -51,7 +51,7 @@ nothing, selects no model or provider, and has no API fallback.
 The existing repository's source-install route is a Git checkout:
 
 ```sh
-git clone https://github.com/Golfplan18/agent-bridge.git
+git clone https://github.com/ora-commons/agent-bridge.git
 cd /absolute/path/to/agent-bridge
 ```
 
