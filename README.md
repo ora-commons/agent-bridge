@@ -157,6 +157,15 @@ seconds by default, overridden by `--timeout <seconds>`. Cleanup has a separate
 bounded grace period. Keep the caller attached longer than the deadline plus
 cleanup; do not detach it. Bridge never retries and is idle when its command exits.
 
+Only a session targeting MiniMax may add `--max-steps <positive-integer>` or
+`--require-model <provider/model>` to `run`. The first deliberately changes
+MiniMax's default one-assistant-step bound. The second makes Bridge inspect the
+MiniMax 0.2.7 JSON result, require a byte-exact runtime provider/model identity,
+and publish only its final answer text. Bridge validates that identity; it does
+not select or change the model. Omitting both options preserves the one-step,
+plain-text MiniMax call, and either option is refused for every other target
+before request publication.
+
 ## Using Bridge from an application
 
 An application needs no harness skill, SDK, registration, or Bridge code change.
@@ -182,9 +191,11 @@ validates the target, so the application need not keep a copied target list.
 Use the same subprocess pattern for session creation and notes, adding
 `input=body` for complete nonempty Markdown. For a call, the arguments after
 `bridge` are `run`, `--session`, and the absolute session path, optionally
-`--timeout` and its value; pass `input=body` and read the response file only on
-exit 0. Target and project come only from the session, not `run` arguments. A UI
-displaying live warnings should drain both streams while keeping the process attached.
+`--timeout` and its value. A MiniMax session may also pass the two bounded
+validation options described above. Pass `input=body` and read the response file
+only on exit 0. Target and project come only from the session, not `run`
+arguments. A UI displaying live warnings should drain both streams while
+keeping the process attached.
 
 ## Adding an initiating host or a target
 

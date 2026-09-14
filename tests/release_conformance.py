@@ -327,7 +327,7 @@ def inspect() -> None:
         options
         == {
             "check": {"--peer"},
-            "run": {"--session", "--timeout"},
+            "run": {"--session", "--timeout", "--max-steps", "--require-model"},
             "record": {"--session", "--kind", "--initiator", "--peer", "--project"},
         },
         "the public command or option surface differs from Format 2",

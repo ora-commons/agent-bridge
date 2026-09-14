@@ -101,6 +101,8 @@ python3 -m bridge check --peer <target-id>
 
 python3 -m bridge run --session <session-directory>
                  [--timeout <seconds>]
+                 [--max-steps <positive-integer>]
+                 [--require-model <provider/model>]
 
 python3 -m bridge record --session <session-directory>
                     --kind session-create
@@ -127,6 +129,15 @@ It runs in a task-owned neutral directory and never touches a real project, inst
 Warnings never prompt, wait for acknowledgment, read an approval flag, or persist consent. A readable version outside exercised evidence may proceed with a warning when every required switch and the fixed one-shot transport remain usable.
 
 Every run starts a fresh vendor context. Bridge neither resumes a vendor session nor sends earlier Bridge messages. An application needing history includes it in the current body.
+
+`--max-steps` and `--require-model` are run-only MiniMax controls and are
+refused for every other recorded target before request publication. An explicit
+positive step bound replaces MiniMax's default of one assistant step for that
+call only. A required model changes MiniMax's internal output to JSON; Bridge
+accepts only a successful schema-version-1 `exec.result` whose reported
+`providerId/modelId` is byte-for-byte identical, then publishes only the final
+string output. This validates runtime identity and does not select a provider or
+model. Omitting both controls preserves the existing one-step plain-text call.
 
 `--timeout` is one deadline for prerequisites, target execution, and response capture, defaulting to 900 seconds. Cleanup has a separate bounded grace period. There is no retry.
 
@@ -270,7 +281,7 @@ A connector may remove tools, use an enforced sandbox, withhold the project, or 
 | Claude Code | Project-capable | Restricted mode, empty strict MCP set, Read/Glob/Grep, planning mode | Administrator-managed or remote policy can survive and add effects |
 | ZCode | Project-capable | Planning mode, explicit directory, known dangerous tools removed | Plugin/direct-MCP limits, indirect OAuth evidence, visible body argument |
 | Hermes Agent | Courier-only | Neutral directory, safe mode, smallest harmless toolset | Read cannot be separated from write, memory remains, visible body argument |
-| MiniMax Code | Courier-only | Neutral directory, `exec` with standard input, `--permission smart`, one assistant step, native timeout within its supported range | Smart is discretionary, not a sandbox; one step does not disable tools; no state-free authentication check |
+| MiniMax Code | Courier-only | Neutral directory, `exec` with standard input, `--permission smart`, one assistant step by default or an explicit positive bound, native timeout within its supported range; optional exact returned-model validation | Smart is discretionary, not a sandbox; a step bound does not disable tools; no state-free authentication check |
 | Qwen Code | Courier-only | Neutral directory, safe and plan modes, pinned native macOS sandbox selection/profile, zero model tool calls, one input frame and turn, compatible time and pre-model command limits | Input preprocessing below; settings/.env may bypass sandbox or launch a detached proxy; profile permits same-user reads, some writes, process launches, and network; no safe no-turn authentication confirmation |
 
 For Codex, `--ignore-user-config` does only what its name understates: it skips `$CODEX_HOME/config.toml`. It does not suppress trusted-project `.codex/config.toml` files and project hooks or rules, system configuration, `managed_config.toml`, `requirements.toml`, cloud-delivered requirements, macOS MDM preferences, or separately sourced user/global hooks and rules. Those surviving layers can add settings the fixed vector does not override, and managed defaults or MDM can override CLI options. Hooks, MCP servers, plugins, network or telemetry settings, and other integrations from surviving configuration may therefore retain routes to external effects outside the read-only shell sandbox. Bridge names that limit in its non-blocking warning. The skipped file's model and effort defaults are also lost, and Bridge does not replace them.
