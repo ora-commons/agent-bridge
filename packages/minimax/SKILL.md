@@ -117,8 +117,17 @@ Write the body to a task-owned temporary file outside the session and supply it
 on standard input to:
 
 ```text
-python3 -m bridge run --session <absolute-session-directory> [--timeout <seconds>] < /absolute/path/to/outgoing-body.md
+python3 -m bridge run --session <absolute-session-directory> [--timeout <seconds>] [--max-steps <positive-integer>] [--require-model <provider/model>] < /absolute/path/to/outgoing-body.md
 ```
+
+The last two options are valid only when this session's target is `minimax`.
+Use `--max-steps` only when the caller deliberately needs more than MiniMax's
+default one assistant step. Use `--require-model` when the caller must reject a
+response unless MiniMax reports that exact runtime provider/model identity.
+Bridge does not select or change that model: it switches MiniMax's internal
+result to JSON, validates the returned identity exactly, and records only the
+final answer text. Other targets reject either option before publishing the
+request. Omitting both keeps MiniMax's existing one-step, plain-text behavior.
 
 Before starting, tell the user which target will be called and which session
 folder will receive the record. A real call can take minutes and consume the

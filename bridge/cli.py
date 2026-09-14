@@ -51,6 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--session", required=True)
     run.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    run.add_argument("--max-steps", type=int)
+    run.add_argument("--require-model")
 
     record = subcommands.add_parser(
         "record", help="create a session or add one neutral note"
@@ -118,6 +120,8 @@ def _run(args: argparse.Namespace) -> str:
         warning_writer=lambda warning: sys.stderr.write(
             "Warning: {0}\n".format(warning)
         ),
+        max_steps=args.max_steps,
+        required_model=args.require_model,
     ).response_path
 
 

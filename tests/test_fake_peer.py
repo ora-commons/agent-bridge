@@ -1931,6 +1931,15 @@ class SixTargetConnectorBehavior(unittest.TestCase):
         )
         with mock.patch.object(minimax, "_prerequisites", return_value=prerequisite):
             command = minimax.build_command(peer.Deadline(30.0), self.temp)
+            bounded = minimax.build_command(
+                peer.Deadline(30.0),
+                self.temp,
+                max_steps=2,
+                required_model="minimax/MiniMax-M3",
+            )
+            bounded_text = minimax.build_command(
+                peer.Deadline(30.0), self.temp, max_steps=2
+            )
             huge = minimax.build_command(
                 peer.Deadline(
                     minimax.MAX_NATIVE_TIMEOUT_MILLISECONDS / 1000.0 + 1.0
@@ -1969,6 +1978,109 @@ class SixTargetConnectorBehavior(unittest.TestCase):
         self.assertNotIn("--timeout", huge.argv)
         self.assertNotIn("--timeout", astronomical.argv)
         self.assertIn("--max-steps", huge.argv)
+        self.assertEqual(
+            bounded.argv[bounded.argv.index("--max-steps") + 1], "2"
+        )
+        self.assertEqual(
+            bounded.argv[bounded.argv.index("--output-format") + 1], "json"
+        )
+        self.assertIsNotNone(bounded.response_parser)
+        self.assertEqual(
+            bounded_text.argv[bounded_text.argv.index("--output-format") + 1],
+            "text",
+        )
+        self.assertIsNone(bounded_text.response_parser)
+
+    def test_minimax_strict_json_parser_accepts_only_exact_runtime_identity(self):
+        required = "minimax/MiniMax-M3"
+        valid = {
+            "schemaVersion": 1,
+            "type": "exec.result",
+            "status": "succeeded",
+            "output": "Final answer only.\n",
+            "model": {"providerId": "minimax", "modelId": "MiniMax-M3"},
+        }
+        self.assertEqual(
+            minimax.parse_response(json.dumps(valid), required), valid["output"]
+        )
+        invalid = ["not JSON", json.dumps([])]
+        invalid.extend(json.dumps(dict(valid, **change)) for change in (
+            {"schemaVersion": True}, {"type": "other"}, {"status": "failed"},
+            {"output": None}, {"model": None},
+            {"model": {"providerId": "minimax", "modelId": "minimax-m3"}},
+        ))
+        for result in invalid:
+            with self.subTest(result=result):
+                with self.assertRaises(BridgeError) as caught:
+                    minimax.parse_response(result, required)
+                self.assertEqual(caught.exception.failure, Failure.PEER_FAILURE)
+
+    def test_minimax_run_options_forward_and_other_targets_refuse_them_unsent(self):
+        turn = mock.Mock(response_path="/response.md")
+        stdout = io.StringIO()
+        with mock.patch.object(cli.runner, "run_turn", return_value=turn) as called, \
+                mock.patch("sys.stdout", stdout), \
+                mock.patch("sys.stdin", io.StringIO("Please answer.\n")):
+            self.assertEqual(cli.main([
+                "run", "--session", "/session", "--max-steps", "2",
+                "--require-model", "minimax/MiniMax-M3",
+            ]), 0)
+        self.assertEqual(stdout.getvalue(), "/response.md\n")
+        called.assert_called_once_with(
+            session_dir="/session",
+            body="Please answer.\n",
+            timeout_seconds=900.0,
+            warning_writer=mock.ANY,
+            max_steps=2,
+            required_model="minimax/MiniMax-M3",
+        )
+
+        minimax_session = os.path.join(self.temp, "minimax-options")
+        record.record(
+            minimax_session, "session-create", "Bounded MiniMax call.\n",
+            initiator="ordinary.app", peer="minimax",
+        )
+        observed = []
+
+        class FakeMiniMaxConnector:
+            @staticmethod
+            def validate_run_options(max_steps, required_model):
+                minimax.validate_run_options(max_steps, required_model)
+
+        def build(deadline, cwd, max_steps=None, required_model=None):
+            observed.append((max_steps, required_model))
+            return PeerCommand(
+                argv=(sys.executable, FAKE_PEER, "plain"),
+                cwd=cwd,
+                env=tuple(os.environ.items()),
+            )
+
+        with mock.patch.object(
+            runner.connectors, "resolve", return_value=FakeMiniMaxConnector
+        ):
+            runner.run_turn(
+                minimax_session, "Please answer.\n", 30.0, build,
+                max_steps=2, required_model="minimax/MiniMax-M3",
+            )
+        self.assertEqual(observed, [(2, "minimax/MiniMax-M3")])
+        for peer_id in ("codex", "claude", "zcode", "hermes", "qwen"):
+            with self.subTest(peer=peer_id):
+                session_dir = os.path.join(self.temp, "refuse-" + peer_id)
+                record.record(
+                    session_dir, "session-create", "Wrong target options.\n",
+                    initiator="ordinary.app", peer=peer_id,
+                )
+                with mock.patch.object(
+                    runner.connectors, "resolve",
+                    side_effect=AssertionError("options reached connector"),
+                ):
+                    with self.assertRaises(BridgeError) as caught:
+                        runner.run_turn(
+                            session_dir, "Please answer.\n", 30.0, max_steps=2,
+                            required_model="minimax/MiniMax-M3",
+                        )
+                self.assertEqual(caught.exception.failure, Failure.USAGE_ERROR)
+                self.assertEqual(os.listdir(session.messages_dir(session_dir)), [])
 
     def _qwen_prerequisite(self):
         return (
@@ -2975,6 +3087,10 @@ class CommandLineBody(unittest.TestCase):
                 )
 
     def test_command_surface_rejects_removed_run_and_record_arguments(self):
+        self.assertEqual(
+            release_conformance._command_options(cli.build_parser())["run"],
+            {"--session", "--timeout", "--max-steps", "--require-model"},
+        )
         removed = (
             ["run", "--session", self.session_dir, "--peer", "hermes"],
             ["run", "--session", self.session_dir, "--project", self.temp],

@@ -205,6 +205,8 @@ def run_turn(
     timeout_seconds: float,
     build_command: Optional[CommandBuilder] = None,
     warning_writer: Optional[WarningWriter] = None,
+    max_steps: Optional[int] = None,
+    required_model: Optional[str] = None,
 ) -> TurnResult:
     """Publish one request and one response for the session's fixed target."""
     try:
@@ -223,6 +225,13 @@ def run_turn(
 
     deadline = Deadline(timeout)
     record = session_module.read_session(session_dir)
+    has_minimax_options = max_steps is not None or required_model is not None
+    if has_minimax_options and record.peer != "minimax":
+        raise BridgeError(
+            Failure.USAGE_ERROR,
+            detail="--max-steps and --require-model are available only for a "
+            "session whose recorded target is minimax",
+        )
     if record.project is not None and connectors.is_courier_only(record.peer):
         raise BridgeError(
             Failure.USAGE_ERROR,
@@ -231,11 +240,21 @@ def run_turn(
             "target".format(record.peer),
         )
     connector = connectors.resolve(record.peer)
+    if has_minimax_options:
+        connector.validate_run_options(max_steps, required_model)
 
     with session_lock(session_dir):
         with _target_directory(record.project) as cwd:
             deadline.check("composing the peer command")
-            if build_command is None:
+            if has_minimax_options:
+                builder = build_command or connector.build_command
+                command = builder(
+                    deadline,
+                    cwd,
+                    max_steps=max_steps,
+                    required_model=required_model,
+                )
+            elif build_command is None:
                 command = connector.build_command(deadline, cwd)
             else:
                 command = build_command(deadline, cwd)
