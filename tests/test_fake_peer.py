@@ -1771,21 +1771,27 @@ class SixTargetConnectorBehavior(unittest.TestCase):
         ):
             self.assertIn(phrase, codex.WARNING)
 
-        plugin_listing = CompletedCall(
-            0,
-            '{"plugins":[{"id":"exposed","enabled":true,'
-            '"declaredMcpServerNames":["route"],"hookDetails":[{}]}]}',
-            "",
+        # ZCode 0.16.5 wraps the list in an object; 0.16.9 prints it bare.
+        exposed = (
+            '{"id":"exposed","enabled":true,'
+            '"declaredMcpServerNames":["route"],"hookDetails":[{}]}'
         )
-        with mock.patch.object(
-            zcode.connectors, "probe", return_value=plugin_listing
+        for shape, printed in (
+            ("object", '{"plugins":[' + exposed + "]}"),
+            ("array", "[" + exposed + "]"),
         ):
-            plugin_fact = zcode._plugin_fact(
-                "/fake/node", "/fake/zcode", peer.Deadline(30.0), self.temp
-            )
-        self.assertIn("exposed", plugin_fact)
-        self.assertIn("MCP server route", plugin_fact)
-        self.assertIn("hook", plugin_fact)
+            with self.subTest(listing=shape), mock.patch.object(
+                zcode.connectors,
+                "probe",
+                return_value=CompletedCall(0, printed, ""),
+            ):
+                plugin_fact = zcode._plugin_fact(
+                    "/fake/node", "/fake/zcode", peer.Deadline(30.0), self.temp
+                )
+                self.assertIn("exposed", plugin_fact)
+                self.assertIn("MCP server route", plugin_fact)
+                self.assertIn("hook", plugin_fact)
+                self.assertNotIn("unknown", plugin_fact)
 
         with mock.patch.object(zcode, "_modified", side_effect=(100.0, 50.0)):
             sign_in_fact = zcode._sign_in_facts()
@@ -1798,6 +1804,73 @@ class SixTargetConnectorBehavior(unittest.TestCase):
             "visible to other processes",
         ):
             self.assertIn(phrase, hermes.WARNING)
+
+    def test_zcode_starts_through_a_launcher_only_when_its_layout_needs_one(self):
+        resources = os.path.join(self.temp, "ZCode.app", "Contents", "Resources")
+        script = os.path.join(resources, "glm", "zcode.cjs")
+        builtin = os.path.join(resources, "config", "provider", "zcode-builtin.json")
+        bundled = os.path.join(resources, "glm", "provider", "zcode-builtin.json")
+        launcher = os.path.join(self.temp, "Caches", "agent-bridge", "zcode-launcher")
+        entry = os.path.join(launcher, "zcode.cjs")
+        provider_link = os.path.join(launcher, "provider", "zcode-builtin.json")
+
+        def write(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("{}\n")
+
+        def program():
+            with mock.patch.multiple(
+                zcode, SCRIPT=script, BUILTIN_PROVIDER=builtin, LAUNCHER=launcher
+            ), mock.patch.object(
+                zcode.connectors, "executable", return_value="/fake/node"
+            ):
+                return zcode._program()
+
+        # The app ships the provider file only where the bundle does not look:
+        # an owner-only launcher is made holding exactly the two links.
+        write(script)
+        write(builtin)
+        self.assertEqual(program(), ("/fake/node", entry))
+        self.assertEqual(os.readlink(entry), script)
+        self.assertEqual(os.readlink(provider_link), builtin)
+        for folder in (launcher, os.path.dirname(provider_link)):
+            self.assertEqual(os.lstat(folder).st_mode & 0o777, 0o700)
+        self.assertEqual(sorted(os.listdir(launcher)), ["provider", "zcode.cjs"])
+
+        # A link pointing elsewhere is replaced, with nothing left beside it.
+        os.remove(provider_link)
+        os.symlink(script, provider_link)
+        self.assertEqual(program(), ("/fake/node", entry))
+        self.assertEqual(os.readlink(provider_link), builtin)
+        self.assertEqual(
+            os.listdir(os.path.dirname(provider_link)), ["zcode-builtin.json"]
+        )
+
+        # A launcher that is itself a link is refused, and nothing is written
+        # where it points.
+        elsewhere = os.path.join(self.temp, "elsewhere")
+        os.mkdir(elsewhere)
+        shutil.rmtree(launcher)
+        os.symlink(elsewhere, launcher)
+        with self.assertRaises(BridgeError) as caught:
+            program()
+        self.assertEqual(caught.exception.failure, Failure.MISSING_CLI)
+        self.assertIn(launcher, caught.exception.detail)
+        self.assertEqual(os.listdir(elsewhere), [])
+        os.remove(launcher)
+
+        # The vendor's own layout restored: the bundle is started directly.
+        write(bundled)
+        self.assertEqual(program(), ("/fake/node", script))
+        self.assertFalse(os.path.lexists(launcher))
+
+        # The app's own provider file absent too: started directly, so the
+        # bundle reports its own error.
+        os.remove(bundled)
+        os.remove(builtin)
+        self.assertEqual(program(), ("/fake/node", script))
+        self.assertFalse(os.path.lexists(launcher))
 
     def test_readiness_distinguishes_confirmed_and_unconfirmed_authentication(self):
         confirmed = (
