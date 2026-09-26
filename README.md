@@ -45,7 +45,11 @@ working vendor sign-in. Bridge uses only the Python standard library; no Python
 dependency installation is needed. The ordinary executable names are `codex`,
 `claude`, `hermes`, `mcode` (MiniMax), and `qwen`. ZCode uses `node` and the bundle
 at `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs` instead of a
-`zcode` command on `PATH`. Bridge installs no vendor program, signs in to
+`zcode` command on `PATH`. When the installed app ships the bundle's built-in
+provider file where the bundle does not look for it, as ZCode 3.14.1 does,
+Bridge starts the bundle through `~/Library/Caches/agent-bridge/zcode-launcher`,
+an owner-only folder holding just two symbolic links: one to the bundle and
+one to that file. Bridge installs no vendor program, signs in to
 nothing, selects no model or provider, and has no API fallback.
 
 The existing repository's source-install route is a Git checkout:

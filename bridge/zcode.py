@@ -2,11 +2,40 @@
 
 ZCode is Z.AI's coding agent. Its command-line program is not installed on
 `PATH`: it is a JavaScript bundle shipped inside the desktop application, run by
-a Node runtime, so a call is `node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs ...`.
+a Node runtime, so a call is `node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs ...`,
+or, on a desktop build that ships a file the bundle needs somewhere the bundle
+does not look, `node` handed a link to that same bundle in a small launcher
+folder, described next.
 This module is the whole of what Agent Bridge knows about it: where those two
 pieces are, which switches hold the boundary, how the message gets in, how the
 answer comes back, and how to tell - without spending a model turn - whether
 starting it would work at all.
+
+**Why the bundle is sometimes started through a launcher folder.** Before it
+answers a prompt, the bundle loads a built-in provider file, and it works out
+where to look from the path it was started under - the path Node was handed,
+not the place its code really lives. It tries `provider/zcode-builtin.json`
+in the folder of that path, then `config/provider/zcode-builtin.json` in the
+folder five levels above it. ZCode 3.14.1, whose command-line program reports
+0.16.9, ships the file in `Contents/Resources/config/provider/`, which neither
+lookup reaches from `Contents/Resources/glm/`, so every turn stops at once
+with an error naming both places while the commands that spend no turn still
+work. `ZCODE_BUILTIN_PROVIDER_BUNDLED_CONFIG_FILE` and
+`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` were tried and are not consulted by that
+lookup, so no variable can point it elsewhere. So when the file is missing
+from where the bundle looks but present where the application ships it, this
+connector starts the bundle through an owner-only launcher folder in the
+user's cache directory that holds exactly two symbolic links: `zcode.cjs` to
+the real bundle, and `provider/zcode-builtin.json` to the application's own
+file. Node follows the first link to load the code from the real bundle, but
+the path the bundle sees is the link's, so its first lookup lands on the
+second link. Nothing is copied and nothing of the vendor's is changed. The
+folder and its provider subfolder are refused if either is itself a link or
+belongs to another account, and the two links are checked on every call, a
+missing or wrong one being replaced in one atomic step. Should the vendor
+restore the layout the bundle expects, the bundle is started directly again;
+should the application's own file be absent too, it is started directly and
+left to report its own error.
 
 There are two operations here and nothing else. `check` answers whether ZCode
 could be used right now. `build_command` composes the one fixed argument vector
@@ -133,9 +162,11 @@ login's order and spacing, and whether an API-key environment variable is set -
 and says outright that sign-in itself is not confirmed.
 
 **What readiness costs.** Nothing. Where the runtime is, whether the bundle is
-at its documented place, `--version`, `--help`, `version` with the switches the
-turn relies on, `plugins list --json`, and the modification times of two files.
-No model turn among them.
+at its documented place, whether it can find its provider file (and, only when
+it cannot, the launcher's two links, checked and if need be remade),
+`--version`, `--help`, `version` with the switches the turn relies on,
+`plugins list --json`, and the modification times of two files. No model turn
+among them.
 
 SPDX-License-Identifier: CC0-1.0
 """
@@ -144,6 +175,8 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import uuid
 from typing import List, Optional, Tuple
 
 from . import connectors
@@ -160,6 +193,23 @@ RUNTIME = "node"
 #: Where the desktop application keeps the command-line program. There is no
 #: `zcode` on PATH to find; this is the documented location of the bundle.
 SCRIPT = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"
+
+#: Where the bundle first looks for its built-in provider file, relative to the
+#: folder of the path it was started under. Found there, the bundle is started
+#: directly, as it always was.
+PROVIDER_FILE = os.path.join("provider", "zcode-builtin.json")
+
+#: Where the desktop application itself ships that provider file. ZCode 3.14.1
+#: puts it here, where neither of the bundle's own lookups reaches from `SCRIPT`.
+BUILTIN_PROVIDER = (
+    "/Applications/ZCode.app/Contents/Resources/config/provider/"
+    "zcode-builtin.json"
+)
+
+#: The per-user folder the bundle is started from when its provider file is
+#: only at `BUILTIN_PROVIDER`: two symbolic links and nothing else. It is under
+#: the macOS cache directory because the application exists only on macOS.
+LAUNCHER = os.path.join("~", "Library", "Caches", "agent-bridge", "zcode-launcher")
 
 #: What this connector has actually been tested against, declared in source and
 #: never inferred from the machine it is running on. `restrictions` names the
@@ -245,11 +295,13 @@ LOGIN_PAIR_SECONDS = 60.0
 
 
 def _program() -> Tuple[str, str]:
-    """Where the runtime and the bundle are, or `MISSING_CLI` naming which is not.
+    """Where the runtime is and what path the bundle is started under.
 
     The runtime is looked up on PATH the way every other harness program is.
     The bundle is looked for at its one documented place; nothing is searched
-    for, and nothing is installed or put on PATH.
+    for, and nothing is installed or put on PATH. Either missing is
+    `MISSING_CLI` naming which. The second value is the path handed to Node:
+    `SCRIPT` itself, or the launcher's link to it, as `_entry` decides.
     """
     runtime = connectors.executable(RUNTIME)
     if not os.path.isfile(SCRIPT):
@@ -258,7 +310,93 @@ def _program() -> Tuple[str, str]:
             detail="the ZCode desktop application's command-line bundle is "
             "not at {0}".format(SCRIPT),
         )
-    return runtime, SCRIPT
+    return runtime, _entry()
+
+
+def _entry() -> str:
+    """The bundle itself, or its link in the launcher folder, made safe first.
+
+    The bundle is started directly when its provider file is where its own
+    first lookup lands - the layout a vendor fix would restore - and also when
+    the application's own copy at `BUILTIN_PROVIDER` is absent, so that what a
+    person then sees is the bundle's own error rather than one of ours. Only in
+    between, with the file shipped where the application keeps it and nowhere
+    the bundle looks, is the launcher made or repaired and its link returned.
+    A launcher that cannot be made or trusted is `MISSING_CLI` naming the folder
+    and the reason, raised here and so before any request is published.
+    """
+    if os.path.isfile(os.path.join(os.path.dirname(SCRIPT), PROVIDER_FILE)):
+        return SCRIPT
+    if not os.path.isfile(BUILTIN_PROVIDER):
+        return SCRIPT
+    launcher = os.path.expanduser(LAUNCHER)
+    entry = os.path.join(launcher, os.path.basename(SCRIPT))
+    try:
+        _private_folder(launcher)
+        _private_folder(os.path.join(launcher, os.path.dirname(PROVIDER_FILE)))
+        _link(entry, SCRIPT)
+        _link(os.path.join(launcher, PROVIDER_FILE), BUILTIN_PROVIDER)
+    except OSError as error:
+        raise BridgeError(
+            Failure.MISSING_CLI,
+            detail="the ZCode bundle does not look for its built-in provider "
+            "file at {0}, where the application ships it, and the launcher "
+            "folder at {1} that lets it find the file could not be prepared: "
+            "{2}".format(BUILTIN_PROVIDER, launcher, error),
+        )
+    return entry
+
+
+def _private_folder(path: str) -> None:
+    """Make `path` an owner-only folder of this account's, or refuse it.
+
+    Created, with any missing parents, if it is absent. It is refused, not
+    repaired, if it is itself a symbolic link or anything but a folder, or
+    belongs to another account, because either would let something other than
+    this account decide what Node runs. One of this account's own whose
+    permissions have been opened up is closed to owner-only again.
+    """
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    status = os.lstat(path)
+    if not stat.S_ISDIR(status.st_mode):
+        raise OSError(
+            "{0} is a symbolic link or something other than a folder".format(
+                path
+            )
+        )
+    if status.st_uid != os.getuid():
+        raise OSError("{0} belongs to another account".format(path))
+    if stat.S_IMODE(status.st_mode) != 0o700:
+        os.chmod(path, 0o700)
+
+
+def _link(path: str, target: str) -> None:
+    """Make `path` a symbolic link to `target`, replacing whatever is there.
+
+    Left alone when it already is exactly that link. Otherwise the new link is
+    made under a name no other call can choose, in the same folder, and renamed
+    over `path` in one step, so two calls repairing it at once each leave a
+    whole link behind and neither can see a half-made one. A link that cannot be
+    put in place is removed again before the error goes on.
+    """
+    try:
+        if os.readlink(path) == target:
+            return
+    except OSError:
+        pass  # Absent, or not a link: replaced below either way.
+    temporary = os.path.join(
+        os.path.dirname(path),
+        ".{0}.{1}.tmp".format(os.path.basename(path), uuid.uuid4().hex),
+    )
+    os.symlink(target, temporary)
+    try:
+        os.replace(temporary, path)
+    except OSError:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def _modified(path: str) -> Optional[float]:
@@ -337,7 +475,13 @@ def _names(value: object) -> List[str]:
 def _plugin_fact(
     runtime: str, script: str, deadline: Deadline, cwd: str
 ) -> str:
-    """Describe exposed plugin routes without turning uncertainty into refusal."""
+    """Describe exposed plugin routes without turning uncertainty into refusal.
+
+    The listing is read in either of the two shapes ZCode has printed it in:
+    an object whose `plugins` entry is the list, as 0.16.5 prints it, or the
+    list on its own, as 0.16.9 does. Each plugin in it is handled the same way
+    whichever shape carried it.
+    """
     try:
         listing = connectors.probe(
             (runtime, script, "plugins", "list", "--json"), cwd, deadline
@@ -353,7 +497,7 @@ def _plugin_fact(
             parsed = json.loads(listing.stdout)
         except ValueError:
             parsed = None
-    plugins = parsed.get("plugins") if isinstance(parsed, dict) else None
+    plugins = parsed.get("plugins") if isinstance(parsed, dict) else parsed
     if not isinstance(plugins, list):
         return (
             "zcode plugins list --json could not be read (exit {0}: {1}), "
@@ -484,7 +628,9 @@ def check(deadline: Deadline, cwd: str) -> connectors.CheckResult:
     `cwd` is a neutral directory made for this command, so the questions are
     asked somewhere with nothing in it. No real project is touched, nothing is
     installed, nobody is logged in, no model or provider is chosen, and nothing
-    is written down for next time.
+    is written down for next time. The one thing that may be written is the
+    launcher's pair of links, when the bundle needs them to be started at all;
+    they hold no state and are checked again by every call.
     """
     program, version, described, account, warnings = _prerequisites(deadline, cwd)
     return connectors.readiness(

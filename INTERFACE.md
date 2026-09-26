@@ -147,7 +147,7 @@ Success writes only the response path to standard output and exits 0. If a targe
 
 ### `record`
 
-`record` is the only local writer besides `run`. It creates a session or adds an application-neutral note without calling a target, using the shared validation, numbering, lock, envelope, and atomic writer.
+`record` is the only local writer besides `run`. It creates a session or adds an application-neutral note without calling a target, using the shared validation, numbering, lock, envelope, and atomic writer. Outside session records, the only local write is the ZCode connector's pair of launcher links in `~/Library/Caches/agent-bridge/zcode-launcher`, which `check` and `run` may create or repair when the installed ZCode needs them to start at all (see README).
 
 Its substantive text comes from standard input. Empty or whitespace-only input is a usage error. Success prints the canonical path.
 
