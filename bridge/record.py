@@ -10,7 +10,7 @@ SPDX-License-Identifier: CC0-1.0
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Optional, Sequence, Tuple
 
 from . import session as session_module
 from .connectors import HARNESS_IDS
@@ -18,6 +18,10 @@ from .errors import BridgeError, Failure
 from .locking import session_lock
 
 RECORD_KINDS = ("session-create", "note")
+
+#: The working modes a session may be explicitly created in. Omitting the
+#: mode entirely keeps the original Format 2 session and its behavior.
+SESSION_MODES = session_module.MODES
 
 
 def _require(value: Optional[str], what: str) -> str:
@@ -35,25 +39,47 @@ def _require_peer(value: Optional[str]) -> str:
     return identifier
 
 
-def _project_path(project: Optional[str]) -> Optional[str]:
-    if project is None:
+def _directory_path(option: str, path: Optional[str]) -> Optional[str]:
+    if path is None:
         return None
-    if not os.path.isabs(project):
+    if not os.path.isabs(path):
         raise BridgeError(
             Failure.USAGE_ERROR,
-            detail="--project must be an absolute existing directory",
+            detail="{0} must be an absolute existing directory".format(option),
         )
-    if not os.path.isdir(project):
+    if not os.path.isdir(path):
         raise BridgeError(
             Failure.USAGE_ERROR,
-            detail="--project is not an existing directory: {0}".format(project),
+            detail="{0} is not an existing directory: {1}".format(option, path),
         )
-    if "\n" in project or "\r" in project or project != project.strip():
+    if "\n" in path or "\r" in path or path != path.strip():
         raise BridgeError(
             Failure.USAGE_ERROR,
-            detail="--project cannot contain line breaks or surrounding whitespace",
+            detail="{0} cannot contain line breaks or surrounding whitespace".format(
+                option
+            ),
         )
-    return project
+    return path
+
+
+def _project_path(project: Optional[str]) -> Optional[str]:
+    return _directory_path("--project", project)
+
+
+def _access_paths(paths: Optional[Sequence[str]]) -> Tuple[str, ...]:
+    """Validate every declared access directory, refusing repeats."""
+    if paths is None:
+        return ()
+    validated = []
+    for path in paths:
+        checked = _directory_path("--access-path", path)
+        if checked in validated:
+            raise BridgeError(
+                Failure.USAGE_ERROR,
+                detail="--access-path repeats the directory {0}".format(checked),
+            )
+        validated.append(checked)
+    return tuple(validated)
 
 
 def _create_session(
@@ -62,13 +88,32 @@ def _create_session(
     initiator: Optional[str],
     peer: Optional[str],
     project: Optional[str],
+    mode: Optional[str] = None,
+    access_paths: Optional[Sequence[str]] = None,
 ) -> str:
-    """Write the immutable Format 2 session record and allocate no number."""
+    """Write the immutable session record and allocate no number.
+
+    Without `mode` this is the Format 2 session exactly as before. A named
+    mode writes Format 3, records the working mode immutably, and may record
+    additional access directories; a work session may be created without a
+    project directory, because a project can begin before any code exists.
+    """
     initiator_label = session_module.validate_initiator(
         _require(initiator, "--initiator")
     )
     peer_id = _require_peer(peer)
     project_directory = _project_path(project)
+    if access_paths and mode is None:
+        raise BridgeError(
+            Failure.USAGE_ERROR,
+            detail="--access-path requires an explicit --mode session",
+        )
+    if mode is not None and mode not in SESSION_MODES:
+        raise BridgeError(
+            Failure.USAGE_ERROR,
+            detail="--mode must be one of: {0}".format(", ".join(SESSION_MODES)),
+        )
+    declared_access = _access_paths(access_paths)
     try:
         os.makedirs(session_module.messages_dir(session_dir), exist_ok=True)
     except OSError as exc:
@@ -83,6 +128,8 @@ def _create_session(
                 peer_id,
                 body,
                 project=project_directory,
+                mode=mode,
+                access_paths=declared_access,
             ),
         )
 
@@ -108,6 +155,8 @@ def record(
     initiator: Optional[str] = None,
     peer: Optional[str] = None,
     project: Optional[str] = None,
+    mode: Optional[str] = None,
+    access_paths: Optional[Sequence[str]] = None,
 ) -> str:
     """Create a session or add a note, returning the canonical path."""
     if kind not in RECORD_KINDS:
@@ -116,12 +165,21 @@ def record(
         raise BridgeError(Failure.USAGE_ERROR, detail="the record body was empty")
 
     if kind == "session-create":
-        return _create_session(session_dir, body, initiator, peer, project)
+        return _create_session(
+            session_dir, body, initiator, peer, project, mode, access_paths
+        )
 
-    if initiator is not None or peer is not None or project is not None:
+    if (
+        initiator is not None
+        or peer is not None
+        or project is not None
+        or mode is not None
+        or access_paths is not None
+    ):
         raise BridgeError(
             Failure.USAGE_ERROR,
-            detail="note accepts no --initiator, --peer, or --project argument",
+            detail="note accepts no --initiator, --peer, --project, --mode, "
+            "or --access-path argument",
         )
     session_record = session_module.read_session(session_dir)
     with session_lock(session_dir):

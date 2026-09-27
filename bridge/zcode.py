@@ -37,11 +37,13 @@ restore the layout the bundle expects, the bundle is started directly again;
 should the application's own file be absent too, it is started directly and
 left to report its own error.
 
-There are two operations here and nothing else. `check` answers whether ZCode
+There are three operations here and nothing else. `check` answers whether ZCode
 could be used right now. `build_command` composes the one fixed argument vector
-a turn runs. Both do the same inexpensive prerequisites first, because a turn
-that skipped them would find out about a missing runtime, a renamed switch or a
-newly enabled plugin in the middle of real work, with the peer already running.
+a review turn runs. `build_work_command` composes the edit-mode prompt a work
+turn runs. All of them do the same inexpensive prerequisites first, because a
+turn that skipped them would find out about a missing runtime, a renamed switch
+or a newly enabled plugin in the middle of real work, with the peer already
+running.
 
 **How the message gets in, and why this connector is the declared exception.**
 Agent Bridge sends the outgoing body on standard input wherever a harness has
@@ -177,7 +179,7 @@ import json
 import os
 import stat
 import uuid
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from . import connectors
 from .errors import BridgeError, Failure
@@ -213,7 +215,7 @@ LAUNCHER = os.path.join("~", "Library", "Caches", "agent-bridge", "zcode-launche
 
 #: What this connector has actually been tested against, declared in source and
 #: never inferred from the machine it is running on. `restrictions` names the
-#: switches the vector below passes to hold the boundary: remove the tools that
+#: exact switches the vector below passes to hold the boundary: remove the tools that
 #: could write or reach out, run under the enforced planning posture, and take
 #: the working root from the command line.
 QUALIFICATION = connectors.Qualification(
@@ -227,6 +229,44 @@ QUALIFICATION = connectors.Qualification(
         "--mode",
         "--cwd",
     ),
+)
+
+#: What this connector offers beyond its restricted review call. Work is
+#: ZCode's own `edit` permission mode - never `yolo`, which is the mode a bare
+#: `--prompt` defaults to and which auto-approves everything. Images have a
+#: native attachment switch that feeds the model real inline image content.
+CAPABILITIES = connectors.Capabilities(
+    work="supported",
+    work_detail=(
+        "work uses zcode --mode edit, ZCode's own permission mode in which "
+        "workspace file edits are allowed and every other approval-needing "
+        "tool is denied by the deny broker a headless prompt uses; yolo is "
+        "never selected"
+    ),
+    image="supported",
+    image_detail=(
+        "images travel as native --prompt attachments via --attach, which "
+        "ZCode reads and hands to the model as inline image content"
+    ),
+)
+
+#: The switches beyond the review set that a work turn relies on. `--mode` and
+#: `--cwd` are already proven by the review set and its no-turn probe;
+#: `--attach` is the work-only switch, present in this build's help and proven
+#: by the earlier executable probe that handed a --attach path to the model.
+WORK_RESTRICTIONS = (
+    "--attach",
+)
+
+WORK_WARNING = (
+    "ZCode work runs in edit mode: workspace file edits are allowed "
+    "automatically, and any other tool that would need approval is denied, "
+    "because a headless prompt has no approver and ZCode's default broker "
+    "denies rather than asks. The review call's tool deny list is not "
+    "applied, so the ordinary tool set is available under those rules, and "
+    "enabled plugins and directly configured MCP servers keep whatever routes "
+    "they already had. The prompt default for --prompt is yolo; this vector "
+    "overrides it with edit on every call."
 )
 
 #: The prefix the body is bound to as the final argument. One argument, so no
@@ -546,7 +586,7 @@ def _plugin_fact(
 
 
 def _prerequisites(
-    deadline: Deadline, cwd: str
+    deadline: Deadline, cwd: str, work: bool = False
 ) -> Tuple[str, str, str, str, Tuple[str, ...]]:
     """Everything that has to be true before starting ZCode is worth doing.
 
@@ -556,9 +596,10 @@ def _prerequisites(
     sign-in, does any enabled plugin expose what no switch can remove, and are
     the switches the turn relies on really accepted - proven by passing them to
     a subcommand that spends no turn, because this program's help text lists
-    switches its parser rejects. Missing software, minimum local sign-in state,
-    or required mechanics raises; plugin exposure or uncertainty and the lack
-    of live OAuth evidence are returned as warnings.
+    switches its parser rejects. A work turn additionally proves the work-only
+    switches exist. Missing software, minimum local sign-in state, or required
+    mechanics raises; plugin exposure or uncertainty and the lack of live OAuth
+    evidence are returned as warnings.
 
     Returns the four facts a readiness report needs and a turn uses: the
     program as it is started, which version answered, how this computer
@@ -575,10 +616,21 @@ def _prerequisites(
     sign_in = _sign_in_facts()
     plugins = _plugin_fact(runtime, script, deadline, cwd)
 
-    connectors.qualified_restrictions(
-        connectors.probe((runtime, script, "--help"), cwd, deadline),
-        QUALIFICATION,
-    )
+    help_call = connectors.probe((runtime, script, "--help"), cwd, deadline)
+    connectors.qualified_restrictions(help_call, QUALIFICATION)
+    mode = "edit" if work else "plan"
+    if work:
+        connectors.qualified_restrictions(
+            help_call,
+            connectors.Qualification(
+                cli_identity=QUALIFICATION.cli_identity,
+                versions=QUALIFICATION.versions,
+                os_family=QUALIFICATION.os_family,
+                os_major_versions=QUALIFICATION.os_major_versions,
+                architectures=QUALIFICATION.architectures,
+                restrictions=WORK_RESTRICTIONS,
+            ),
+        )
     accepted = connectors.probe(
         (
             runtime,
@@ -587,7 +639,7 @@ def _prerequisites(
             "--disallowed-tools",
             "Edit",
             "--mode",
-            "plan",
+            mode,
             "--cwd",
             cwd,
         )
@@ -604,10 +656,12 @@ def _prerequisites(
                 (accepted.stderr or accepted.stdout).strip()[:160],
             ),
         )
+    if work:
+        warnings.append(WORK_WARNING)
     warnings.append(
         "ZCode cannot shed enabled plugins or directly configured MCP "
-        "servers per call, and plan mode may admit non-destructive MCP tools; "
-        "{0}. {1}.".format(plugins, sign_in)
+        "servers per call, and {0} mode may admit non-destructive MCP tools; "
+        "{1}. {2}.".format(mode, plugins, sign_in)
     )
     warnings.append(
         "ZCode receives the complete message in one --prompt argument, which "
@@ -622,17 +676,22 @@ def _prerequisites(
     )
 
 
-def check(deadline: Deadline, cwd: str) -> connectors.CheckResult:
+def check(
+    deadline: Deadline, cwd: str, mode: str = "review"
+) -> connectors.CheckResult:
     """Report whether ZCode could be used right now, spending no model turn.
 
     `cwd` is a neutral directory made for this command, so the questions are
-    asked somewhere with nothing in it. No real project is touched, nothing is
-    installed, nobody is logged in, no model or provider is chosen, and nothing
-    is written down for next time. The one thing that may be written is the
+    asked somewhere with nothing in it. No real project is touched, nothing
+    is installed, nobody is logged in, no model or provider is chosen, and
+    nothing is written down for next time. The one thing that may be written is the
     launcher's pair of links, when the bundle needs them to be started at all;
-    they hold no state and are checked again by every call.
+    they hold no state and are checked again by every call. A work-mode check
+    also proves the work vector's own switches exist on the installed version.
     """
-    program, version, described, account, warnings = _prerequisites(deadline, cwd)
+    program, version, described, account, warnings = _prerequisites(
+        deadline, cwd, work=(mode == "work")
+    )
     return connectors.readiness(
         HARNESS_ID,
         program,
@@ -674,6 +733,44 @@ def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
             DENIED_TOOLS,
         )
         + OUTPUT_FORMAT,
+        cwd=cwd,
+        env=connectors.environment(),
+        body_argument=BODY_ARGUMENT,
+        warnings=warnings,
+    )
+
+
+def build_work_command(
+    deadline: Deadline,
+    cwd: str,
+    access_paths: Sequence[str] = (),
+    attachments: Sequence[str] = (),
+    max_steps: Optional[int] = None,
+    required_model: Optional[str] = None,
+) -> connectors.PeerCommand:
+    """The ordinary ZCode prompt in `edit` mode, with its real tool set.
+
+    Two things from the review vector are deliberately absent: the tool deny
+    list, because work needs the ordinary tool set, and `plan` mode. The mode
+    a bare `--prompt` would get is `yolo`, which auto-approves everything, so
+    the vector names `edit` on every call: workspace file edits are allowed,
+    and anything else that would need an approval is denied - a headless
+    prompt has no approver, and ZCode's default broker denies rather than
+    asks. Declared access directories are recorded in the session and stay
+    reachable as ordinary same-user paths; ZCode has no per-call switch that
+    widens its working root. Each attachment becomes one `--attach`, which
+    ZCode reads and hands to the model as inline image content.
+    """
+    runtime, script = _program()
+    _program_name, _version, _described, _account, warnings = _prerequisites(
+        deadline, cwd, work=True
+    )
+    argv = [runtime, script, "--mode", "edit", "--cwd", cwd]
+    for attachment in attachments:
+        argv.extend(("--attach", attachment))
+    argv.extend(OUTPUT_FORMAT)
+    return connectors.PeerCommand(
+        argv=tuple(argv),
         cwd=cwd,
         env=connectors.environment(),
         body_argument=BODY_ARGUMENT,

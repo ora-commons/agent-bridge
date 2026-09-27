@@ -89,6 +89,18 @@ from .peer import SignalStop, stopped_by_signal
 SESSION_FILENAME = "SESSION.md"
 MESSAGES_DIRNAME = "messages"
 
+#: The session formats this runtime reads. Format 2 is the original courier
+#: shape and remains what a caller gets when it names no extended session
+#: option. Format 3 adds the immutable working-mode and access-directory
+#: fields and the extended request headers; each format keeps its own strict
+#: parser and neither is ever migrated into the other.
+SUPPORTED_FORMATS = ("2", "3")
+FORMAT_3 = "3"
+
+#: The working modes a Format 3 session may record. A Format 2 session is
+#: always read as review mode.
+MODES = ("review", "work")
+
 #: Every temporary file this module creates while publishing carries this
 #: prefix, so a check can assert that none of them survived a failure.
 TEMP_PREFIX = ".agent-bridge-publish-"
@@ -109,7 +121,9 @@ class SessionRecord(NamedTuple):
 
     Written once when the session is created and never changed afterwards, so
     nothing in here can go stale: the calling application's inert label, the
-    target it selected, and the project when there is one.
+    target it selected, and the project when there is one. A Format 3 session
+    additionally carries its immutable working mode and declared access
+    directories; a Format 2 session always reads as review mode with none.
     """
 
     directory: str
@@ -117,6 +131,8 @@ class SessionRecord(NamedTuple):
     initiator: str
     peer: str
     project: Optional[str]
+    mode: str = "review"
+    access_paths: Tuple[str, ...] = ()
 
 
 # -- paths ------------------------------------------------------------------
@@ -409,15 +425,33 @@ def session_text(
     peer: str,
     body: str,
     project: Optional[str] = None,
+    mode: Optional[str] = None,
+    access_paths: Sequence[str] = (),
 ) -> str:
-    """`SESSION.md`, written once and never edited."""
-    header_lines = [
-        "Bridge-Format: {0}".format(BRIDGE_FORMAT),
-        "Initiator: {0}".format(initiator),
-        "Peer: {0}".format(peer),
-    ]
+    """`SESSION.md`, written once and never edited.
+
+    Without `mode` this is the Format 2 session, byte for byte as before. A
+    named mode writes Format 3 and records the immutable working mode and
+    every declared access directory; the body below `## Body` is never touched
+    to hold any of it.
+    """
+    if mode is None:
+        header_lines = [
+            "Bridge-Format: {0}".format(BRIDGE_FORMAT),
+            "Initiator: {0}".format(initiator),
+            "Peer: {0}".format(peer),
+        ]
+    else:
+        header_lines = [
+            "Bridge-Format: {0}".format(FORMAT_3),
+            "Initiator: {0}".format(initiator),
+            "Peer: {0}".format(peer),
+            "Mode: {0}".format(mode),
+        ]
     if project:
         header_lines.append("Project: {0}".format(project))
+    for path in access_paths:
+        header_lines.append("Access-Path: {0}".format(path))
     return "# Session\n" + _compose("", header_lines, body)
 
 
@@ -426,12 +460,25 @@ def initiator_to_peer_text(
     initiator: str,
     peer: str,
     body: str,
+    note_ref: Optional[str] = None,
+    purpose: Optional[str] = None,
+    attachments: Sequence[str] = (),
 ) -> str:
     """A request going out to the peer.
 
-    A request carries nothing but who it is from and who it is for.
+    A Format 2 request carries nothing but who it is from and who it is for.
+    A Format 3 request may additionally carry the caller's inert note
+    reference and purpose labels and its explicit attachment references. All
+    of it stays above `## Body`; the exact submitted text below it never grows
+    a metadata line.
     """
     header_lines = ["From: {0}".format(initiator), "To: {0}".format(peer)]
+    if note_ref is not None:
+        header_lines.append("Note-Ref: {0}".format(note_ref))
+    if purpose is not None:
+        header_lines.append("Purpose: {0}".format(purpose))
+    for attachment in attachments:
+        header_lines.append("Attachment: {0}".format(attachment))
     return _compose(
         "# Message {0}".format(format_sequence(sequence)), header_lines, body
     )
@@ -442,9 +489,16 @@ def peer_to_initiator_text(
     peer: str,
     initiator: str,
     body: str,
+    answers: Optional[int] = None,
 ) -> str:
-    """A peer's final answer, copied through unchanged."""
+    """A peer's final answer, copied through unchanged.
+
+    A Format 3 response names the request sequence it answers, so a caller
+    reading the record can pair them without guessing.
+    """
     header_lines = ["From: {0}".format(peer), "To: {0}".format(initiator)]
+    if answers is not None:
+        header_lines.append("Answers: {0}".format(format_sequence(answers)))
     return _compose(
         "# Message {0}".format(format_sequence(sequence)), header_lines, body
     )
@@ -470,12 +524,19 @@ def _normalise(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _session_fields(text: str) -> Dict[str, str]:
-    """Parse only the fixed Format 2 session envelope.
+def _session_fields(text: str) -> Dict[str, object]:
+    """Parse the fixed session envelope for Format 2 or Format 3, strictly.
 
-    The parser accepts the writer's exact structure, rejects duplicate and
-    unknown fields, and stops structurally before the inert body. Text below
-    `## Body` can therefore look like headers without changing the session.
+    The parser accepts only the writer's exact structure for the format the
+    file itself declares, rejects duplicate and unknown fields, and stops
+    structurally before the inert body. Text below `## Body` can therefore
+    look like headers without changing the session.
+
+    Format 2 admits `Bridge-Format`, `Initiator`, `Peer` and `Project`. Format
+    3 admits those plus `Mode` and repeatable `Access-Path` lines, and requires
+    `Mode`. A Format 2 file carrying a Format 3 field, or the reverse, is
+    rejected rather than reconciled: the two formats are never migrated into
+    one another.
     """
     lines = _normalise(text).split("\n")
     if not lines or lines[0] != "# Session":
@@ -485,11 +546,19 @@ def _session_fields(text: str) -> Dict[str, str]:
     if len(lines) < 7 or lines[1] != "":
         raise BridgeError(
             Failure.SESSION_INVALID,
-            detail="SESSION.md does not have the Format 2 header layout",
+            detail="SESSION.md does not have the session header layout",
         )
 
-    fields = {}  # type: Dict[str, str]
-    allowed = {"Bridge-Format", "Initiator", "Peer", "Project"}
+    fields = {}  # type: Dict[str, object]
+    allowed = {
+        "Bridge-Format",
+        "Initiator",
+        "Peer",
+        "Project",
+        "Mode",
+        "Access-Path",
+    }
+    access_paths = []  # type: List[str]
     index = 2
     while index < len(lines) and lines[index] != "":
         line = lines[index]
@@ -497,12 +566,7 @@ def _session_fields(text: str) -> Dict[str, str]:
         if not separator or name not in allowed or not value.startswith(" "):
             raise BridgeError(
                 Failure.SESSION_INVALID,
-                detail="invalid Format 2 session header: {0!r}".format(line),
-            )
-        if name in fields:
-            raise BridgeError(
-                Failure.SESSION_INVALID,
-                detail="SESSION.md repeats the {0} field".format(name),
+                detail="invalid session header: {0!r}".format(line),
             )
         parsed = value[1:]
         if not parsed or parsed != parsed.strip():
@@ -510,8 +574,49 @@ def _session_fields(text: str) -> Dict[str, str]:
                 Failure.SESSION_INVALID,
                 detail="SESSION.md has an invalid {0} value".format(name),
             )
-        fields[name] = parsed
+        if name == "Access-Path":
+            if parsed in access_paths:
+                raise BridgeError(
+                    Failure.SESSION_INVALID,
+                    detail="SESSION.md repeats the Access-Path {0}".format(parsed),
+                )
+            access_paths.append(parsed)
+        elif name in fields:
+            raise BridgeError(
+                Failure.SESSION_INVALID,
+                detail="SESSION.md repeats the {0} field".format(name),
+            )
+        else:
+            fields[name] = parsed
         index += 1
+
+    declared = fields.get("Bridge-Format")
+    if declared not in SUPPORTED_FORMATS:
+        raise BridgeError(
+            Failure.SESSION_INVALID,
+            detail="unsupported Bridge-Format: {0}".format(declared),
+        )
+    if declared == FORMAT_3:
+        if "Mode" not in fields:
+            raise BridgeError(
+                Failure.SESSION_INVALID,
+                detail="a Format 3 SESSION.md has no Mode line",
+            )
+        if fields["Mode"] not in MODES:
+            raise BridgeError(
+                Failure.SESSION_INVALID,
+                detail="SESSION.md has an unsupported Mode: {0}".format(
+                    fields["Mode"]
+                ),
+            )
+    else:
+        for extended in ("Mode", "Access-Path"):
+            if extended in fields or (extended == "Access-Path" and access_paths):
+                raise BridgeError(
+                    Failure.SESSION_INVALID,
+                    detail="a Format 2 SESSION.md carries the Format 3 "
+                    "field {0}".format(extended),
+                )
 
     if index + 2 >= len(lines):
         raise BridgeError(
@@ -520,13 +625,15 @@ def _session_fields(text: str) -> Dict[str, str]:
     if lines[index : index + 3] != ["", BODY_HEADING, ""]:
         raise BridgeError(
             Failure.SESSION_INVALID,
-            detail="SESSION.md does not have the Format 2 body layout",
+            detail="SESSION.md does not have the session body layout",
         )
     body = "\n".join(lines[index + 3 :])
     if not body.strip():
         raise BridgeError(
             Failure.SESSION_INVALID, detail="SESSION.md has an empty body"
         )
+    if access_paths:
+        fields["Access-Path"] = access_paths
     return fields
 
 
@@ -538,6 +645,29 @@ def validate_initiator(label: str, failure: Failure = Failure.USAGE_ERROR) -> st
             detail="initiator must be an ASCII slug beginning with a letter or digit",
         )
     return label
+
+
+def validate_inline_value(name: str, value: str) -> str:
+    """Accept one inert single-line string a caller wants stored in a header.
+
+    A note reference or purpose label travels in a request header, so it may
+    not carry a line break or surrounding whitespace, may not be empty, and is
+    capped where the header stays readable. Bridge stores it without reading
+    anything into it.
+    """
+    if (
+        not value
+        or value != value.strip()
+        or "\n" in value
+        or "\r" in value
+        or len(value) > 256
+    ):
+        raise BridgeError(
+            Failure.USAGE_ERROR,
+            detail="{0} must be one nonempty line of at most 256 characters "
+            "without surrounding whitespace".format(name),
+        )
+    return value
 
 
 def _read_text(path: str, missing: Failure) -> str:
@@ -564,7 +694,7 @@ def read_session(session_dir: str) -> SessionRecord:
                 Failure.SESSION_INVALID,
                 detail="SESSION.md has no {0} line".format(required),
             )
-    if fields["Bridge-Format"] != str(BRIDGE_FORMAT):
+    if fields["Bridge-Format"] not in SUPPORTED_FORMATS:
         raise BridgeError(
             Failure.SESSION_INVALID,
             detail="unsupported Bridge-Format: {0}".format(
@@ -580,11 +710,16 @@ def read_session(session_dir: str) -> SessionRecord:
             detail="SESSION.md names an unsupported peer: {0}".format(fields["Peer"]),
         )
     project = fields.get("Project") or None
-    if project is not None and not os.path.isabs(project):
-        raise BridgeError(
-            Failure.SESSION_INVALID,
-            detail="SESSION.md Project is not absolute: {0}".format(project),
-        )
+    for path in ([project] if project is not None else []) + list(
+        fields.get("Access-Path") or ()  # type: ignore[arg-type]
+    ):
+        if not os.path.isabs(path):
+            raise BridgeError(
+                Failure.SESSION_INVALID,
+                detail="SESSION.md records a non-absolute directory: {0}".format(
+                    path
+                ),
+            )
     if not os.path.isdir(messages_dir(session_dir)):
         raise BridgeError(
             Failure.SESSION_INVALID, detail=messages_dir(session_dir)
@@ -595,6 +730,8 @@ def read_session(session_dir: str) -> SessionRecord:
         initiator=fields["Initiator"],
         peer=fields["Peer"],
         project=project,
+        mode=fields.get("Mode") or "review",
+        access_paths=tuple(fields.get("Access-Path") or ()),
     )
 
 

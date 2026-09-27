@@ -1,6 +1,6 @@
-# Agent Bridge — Release 1 Courier Interface
+# Agent Bridge — Courier and Work-Mode Interface
 
-**Status:** Release 1 courier contract, approved September 3, 2026. All six targets have passed real calls on macOS 26 arm64, including Qwen's corrected stream transport. The exercised CLI versions are listed in the README. Qualification does not by itself complete the release finish line in section 12.
+**Status:** Release 1 courier contract, approved September 3, 2026. All six targets have passed real calls on macOS 26 arm64, including Qwen's corrected stream transport. The exercised CLI versions are listed in the README. The opt-in working mode (Format 3 sessions, JSON readiness, lifecycle events, per-connector work vectors and image routes) was added September 27, 2026 under the authorized work-mode plan; its live qualification evidence is in section 8a. Qualification does not by itself complete the release finish line in section 12.
 
 This is the controlling boundary for the shared runner, six target connectors, and thin initiating adapters. It replaces the former exactly-four-target rule and the former rule that incomplete confinement stopped release.
 
@@ -98,17 +98,23 @@ One session has one initiator and one target. An application reaches several tar
 
 ```text
 python3 -m bridge check --peer <target-id>
+                 [--mode review|work] [--json]
 
 python3 -m bridge run --session <session-directory>
                  [--timeout <seconds>]
                  [--max-steps <positive-integer>]
                  [--require-model <provider/model>]
+                 [--events-jsonl]
+                 [--attachment <absolute-image-path>]...
+                 [--note-ref <id>] [--purpose <label>]
 
 python3 -m bridge record --session <session-directory>
                     --kind session-create
                     --initiator <label>
                     --peer <target-id>
                     [--project <project-directory>]
+                    [--mode review|work]
+                    [--access-path <directory>]...
 
 python3 -m bridge record --session <session-directory>
                     --kind note
@@ -116,11 +122,36 @@ python3 -m bridge record --session <session-directory>
 
 Run these commands from the absolute checkout root. Source installation creates no `agent-bridge` console executable.
 
+Omitting every extended option keeps the original Format 2 behavior byte for byte: the same records, the same stdout, the same review vectors. Each extension below is opt-in.
+
 ### `check`
 
-`check` determines whether a target can be used now. Without a model call it finds the documented CLI, reads version and platform, checks authentication as far as the CLI safely permits, and confirms that the switches needed for fixed input, output, foreground control, and the connector's strongest practical posture still exist.
+`check` determines whether a target can be used now. Without a model call it finds the documented CLI, reads version and platform, checks authentication as far as the CLI safely permits, and confirms that the switches needed for fixed input, output, foreground control, and the connector's strongest practical posture still exist. `--mode work` additionally proves the work vector's own switches exist and reports the connector's work and image capability facts; it changes nothing else.
 
 It runs in a task-owned neutral directory and never touches a real project, installs, signs in, selects a model or provider, or writes qualification state. Success writes one readiness sentence followed by any applicable `Warning:` lines to standard output, leaves standard error empty, and exits 0; warnings do not change that status. A hard failure writes one reason and next action to standard error and exits nonzero. No other connector is imported or examined.
+
+#### `check --json`
+
+`--json` replaces the prose with exactly one JSON object on standard output, one line, no schema version. Success and failure alike produce one object; a failure still exits nonzero.
+
+```json
+{"peer": "codex", "mode": "work", "ready": true,
+ "executable": "/usr/local/bin/codex", "version": "0.155.1",
+ "platform": "Darwin 26 arm64",
+ "authentication": "confirmed",
+ "work": "supported", "image": "supported",
+ "warnings": ["...one concrete warning per line..."]}
+```
+
+| Field | Values and meaning |
+|---|---|
+| `peer`, `mode` | The selected target and the posture checked (`review` or `work`). |
+| `ready` | Whether the selected mode's call mechanics are usable now. A successful local check does not prove the selected model will answer or that every future permission is available. |
+| `executable`, `version`, `platform` | Observed facts about the installed program, or `null` when a failure happened before they could be read. |
+| `authentication` | `confirmed` (the CLI reported a sign-in), `required` (the CLI reported none; the object carries the reason), or `unknown` (this CLI offers no safe no-turn check; unknown is not failure when the route is usable). |
+| `work`, `image` | `supported` (a route is implemented and its switches verified present), `unsupported` (a genuine vendor limitation, named in `warnings` with the terminal route), or `unknown`. Supported means transport support; whether the model accepted a live work call or image is stated in `warnings`, which distinguish verified evidence from unverified acceptance. |
+| `warnings` | The same concrete non-blocking warnings the prose interface prints, plus the capability-detail sentence for any `unsupported` value. |
+| `reason`, `next_action` | Present when `ready` is false: what happened and the one useful next action. |
 
 ### `run`
 
@@ -138,18 +169,58 @@ accepts only a successful schema-version-1 `exec.result` whose reported
 `providerId/modelId` is byte-for-byte identical, then publishes only the final
 string output. This validates runtime identity and does not select a provider or
 model. Omitting both controls preserves the existing one-step plain-text call.
+In a work session, `--max-steps` is forwarded when given and omitted otherwise,
+so the review-only one-step assumption does not apply to work.
 
 `--timeout` is one deadline for prerequisites, target execution, and response capture, defaulting to 900 seconds. Cleanup has a separate bounded grace period. There is no retry.
 
-A courier-only project session cannot run: Bridge refuses before connector import or request publication and tells the application to include evidence in the body or choose a project-capable target.
+A courier-only project session cannot run in review mode: Bridge refuses before connector import or request publication and tells the application to include evidence in the body or choose a project-capable target. A work session runs against the connector's work vector (section 4a); a work session whose target declares work unsupported is refused the same way, with the real limitation and the terminal route in the message.
 
-Success writes only the response path to standard output and exits 0. If a target fails after request publication, the request remains as an honest record, no response is invented, and Bridge writes the failure and next action to standard error and exits nonzero.
+`--note-ref` and `--purpose` store two inert single-line strings in a Format 3 request header: an opaque pairing with a caller note and a name for the request's purpose. Bridge records them without interpreting them or using them to choose authority, files, or workflow. They are refused on a Format 2 session so legacy records never change shape.
+
+`--attachment` names an absolute image file to deliver with the request. It is repeatable, recorded as one `Attachment:` header line per file, accepted only for a Format 3 **work** session whose target has a qualified image route, and validated to exist before anything is published. The exact request body is never modified to mention an attachment; where the route needs the path in the text (Claude), the caller's body must name it and the run warning says so. Missing files, unsupported formats, tool limitations, and model rejection are reported as real failures; the caller owns and retains the original images.
+
+`--events-jsonl` replaces the response-path line on standard output with one JSON object per line describing the turn's lifecycle (section 4b). Standard error remains diagnostics.
+
+Success without `--events-jsonl` writes only the response path to standard output and exits 0. With `--events-jsonl`, standard output carries only event lines and the final `finished` event carries the response path. If a target fails after request publication, the request remains as an honest record, no response is invented, and Bridge writes the failure and next action to standard error and exits nonzero.
 
 ### `record`
 
 `record` is the only local writer besides `run`. It creates a session or adds an application-neutral note without calling a target, using the shared validation, numbering, lock, envelope, and atomic writer. Outside session records, the only local write is the ZCode connector's pair of launcher links in `~/Library/Caches/agent-bridge/zcode-launcher`, which `check` and `run` may create or repair when the installed ZCode needs them to start at all (see README).
 
 Its substantive text comes from standard input. Empty or whitespace-only input is a usage error. Success prints the canonical path.
+
+`--mode review|work` creates a Format 3 session (section 6): an explicit, immutable working mode. `--access-path` records additional existing absolute directories the request needs; it is repeatable, requires an explicit `--mode`, and is refused with repeats. A work session may omit `--project` when no code directory exists yet. A note accepts none of the session-creation options.
+
+---
+
+## 4a. The working mode
+
+A work session is an explicit alternative to the restricted review call, created by `record --kind session-create --mode work`. Its mode, target, working directory, and declared access directories are immutable from creation; message text cannot change them. A work request can read the supplied project material and perform the work the request authorizes through the target's ordinary capabilities, under the target's own normal permissions. The code directory and document directories may differ (`--project` plus `--access-path`); a project can be discussed before code exists (omit `--project`).
+
+Work mode is not a security override. Bridge selects no permission bypass, no `--dangerously-skip-permissions`, no `yolo`, no `full`/`off` policy, and no automatic approval mode to make a headless call succeed. Where a target cannot do non-interactive work under its ordinary permissions, Bridge reports work unsupported with the real diagnostic and the terminal route (open that tool's own terminal interface) rather than quietly weakening anything. Selecting work mode is not blanket permission for publication, purchases, login, destructive operations, or unrelated effects; normal project instructions and the user's tool configuration still apply, and the surviving-boundary warnings of section 8 continue to name what is not confined.
+
+Each connector ships a separate work vector beside its review vector; the review vectors are unchanged and review calls made without the new options behave exactly as before. The four supported work routes and the two honest unsupported ones are in section 8a.
+
+Each call still starts a fresh native context. A successful work call returns the complete final answer, including an AI clarification question when that is the answer; the caller supplies all continuity in a later request. A failed call leaves truthful records: the request is retained, no response is invented, and if the invocation might have edited files before failing, the failure says so.
+
+### `run --events-jsonl`
+
+With `--events-jsonl`, standard output carries one JSON object per line — lifecycle events, periodic check-ins, and exactly one final result — and nothing else; the response path arrives inside the final event. Standard error remains diagnostics, warnings included. Every event object has an `event` field (`started`, `heartbeat`, or `finished`) and a `phase` field.
+
+```json
+{"event": "started", "phase": "run", "peer": "codex", "mode": "work"}
+{"event": "heartbeat", "phase": "prerequisites", "elapsed_seconds": 30.001, "child_running": true}
+{"event": "heartbeat", "phase": "peer-call", "elapsed_seconds": 60.002, "child_running": true}
+{"event": "finished", "phase": "run", "outcome": "success",
+ "request_path": "/…/messages/0001-initiator-to-peer.md",
+ "response_path": "/…/messages/0002-peer-to-initiator.md",
+ "warnings": ["...the same warnings standard error carried..."]}
+```
+
+A heartbeat means Bridge is alive and can report whether its child process is still running; it is not progress and carries no percentages. Heartbeats arrive while prerequisite probes or the peer call are waiting (`phase` says which), about every 30 seconds, and both bounded waits share the turn's one deadline. The final `finished` event carries `outcome` (`success`, `failure`, or `stopped`), `request_path` and `response_path` when published, the warnings, and — for `failure` — a plain `reason` and `next_action`; internal exception names stay internal. A `success` event follows durable response publication. A failed call still exits nonzero. If the event pipe breaks, the turn runs on and its records decide the truth: a broken pipe can never turn an unfinished call into a reported success.
+
+Stop signals, `--timeout`, interruption, cleanup, and the single deadline behave exactly as for any other run; there is no separate cancellation daemon or command service.
 
 ---
 
@@ -159,7 +230,7 @@ Its substantive text comes from standard input. Empty or whitespace-only input i
 
 | Kind | Required arguments | Optional | Result |
 |---|---|---|---|
-| `session-create` | `--initiator <label>`, `--peer <target-id>` | `--project <dir>` | Creates `SESSION.md`; allocates no message number |
+| `session-create` | `--initiator <label>`, `--peer <target-id>` | `--project <dir>`, `--mode review\|work`, repeatable `--access-path <dir>` (with `--mode`) | Creates `SESSION.md`; allocates no message number |
 | `note` | none beyond session and kind | none | Creates one numbered initiator record |
 
 The session body describes the session; a note may hold any application information. Bridge does not classify or interpret either.
@@ -203,6 +274,25 @@ Project: /absolute/path
 
 The session carries no provider or model, harness version, qualification receipt, mutable status, usage, cost, authority, or workflow field. Format 2 distinguishes this courier shape from unreleased construction sessions with workflow fields. An unsupported format is rejected, not guessed or silently migrated.
 
+A session created with an explicit `--mode` is Format 3:
+
+```markdown
+# Session
+
+Bridge-Format: 3
+Initiator: vibe-coder
+Peer: codex
+Mode: work
+Project: /absolute/code/path
+Access-Path: /absolute/document/path
+
+## Body
+
+<application-supplied description>
+```
+
+`Mode:` is required and one of `review` or `work`; `Access-Path:` lines are optional, repeatable, each an absolute directory that exists at creation, and may not repeat. `Project:` may be omitted in a work session when no code directory exists yet. Both formats keep their own strict parsers: a Format 2 file carrying a Format 3 field, or the reverse, is rejected rather than reconciled, and no file is ever migrated. Format 2 sessions always read as review mode with no access paths. Successful runs never delete retained history.
+
 Numbers increase within the session while the lock is held and are never reused. A failed target call may leave a request as the final message; that is an incomplete exchange, not corruption.
 
 ---
@@ -211,7 +301,7 @@ Numbers increase within the session while the lock is held and are never reused.
 
 The runner writes every header. Initiators and targets supply only body text.
 
-Request:
+Request (Format 2, unchanged):
 
 ```markdown
 # Message 0001
@@ -223,7 +313,7 @@ To: claude
 <request copied unchanged>
 ```
 
-Response:
+Response (Format 2, unchanged):
 
 ```markdown
 # Message 0002
@@ -234,6 +324,34 @@ To: ora
 
 <final answer copied unchanged>
 ```
+
+A Format 3 request may additionally carry the caller's inert metadata, and a Format 3 response names the request it answers:
+
+```markdown
+# Message 0001
+From: vibe-coder
+To: codex
+Note-Ref: note-42
+Purpose: second-draft
+Attachment: /absolute/path/image.png
+
+## Body
+
+<request copied unchanged>
+```
+
+```markdown
+# Message 0002
+From: codex
+To: vibe-coder
+Answers: 0001
+
+## Body
+
+<final answer copied unchanged>
+```
+
+`Note-Ref:` and `Purpose:` appear once each when given; `Attachment:` appears once per attached file; `Answers:` carries the request's four-digit sequence. None of it is appended to or read from the body, which stays byte-exact under `## Body`.
 
 Neutral note:
 
@@ -247,9 +365,19 @@ From: ora
 <note copied unchanged>
 ```
 
-Header-shaped text below `## Body` remains body text. It cannot change Bridge identity, target, project, number, kind, restrictions, authority, routing, or become a Bridge command. Bridge extracts no plan, commit, approval, review result, or instruction.
+Header-shaped text below `## Body` remains body text. It cannot change Bridge identity, target, project, mode, number, kind, restrictions, authority, routing, or become a Bridge command. Bridge extracts no plan, commit, approval, review result, or instruction.
 
-Filenames describe direction rather than repeating caller labels. A response is the next message published while the same run holds the lock. There is no correlation, review, or workflow header.
+Filenames describe direction rather than repeating caller labels. A response is the next message published while the same run holds the lock; in Format 3 its `Answers:` header is the correlation, read from the record itself.
+
+### The readable Format 3 record surface
+
+A caller may read everything it needs from the retained records alone, in plain Markdown:
+
+- From `SESSION.md`: the session's working `Mode:` and every declared `Access-Path:` directory, beside the immutable initiator, target, and project.
+- From each request file: its sequence in the title line, its exact body below `## Body` (byte-exact, never modified), and its `Note-Ref:`, `Purpose:`, and `Attachment:` header lines when the caller supplied them.
+- From each response file: its path, its body below `## Body`, and the request sequence it `Answers:`.
+
+Headers are always the block between the title line and the first blank line; everything below `## Body` is inert text. Bridge owns this surface and will keep it readable.
 
 ---
 
@@ -308,6 +436,25 @@ Before real project use, a task-owned synthetic Git repository proves:
 The test uses no real project, secret, message, production service, or publication. Same-user reads outside the project are not claimed to be confined.
 
 Qualification is source evidence, not mutable runtime state. There is no last-passed stamp, cache, receipt, database, or third connector operation. A CLI outside declared evidence warns when the required mechanics still work; qualification updates source rather than granting per-user approval.
+
+---
+
+### 8a. Work vectors and image routes
+
+Each connector's work vector is a separate builder beside its review vector, reusing the same fixed-vector transport, output parsing, bounded execution, deadline, and cleanup. Work vectors preserve ordinary user model/configuration choices and the tool's normal permission policy; Bridge passes no approval bypass of any kind. Access directories are recorded in the session and reach the vector where the tool has a matching switch; otherwise they remain ordinary same-user paths, which is a declaration of need, not an isolation boundary.
+
+| Target | Work | Image route | Basis |
+|---|---|---|---|
+| Codex | Supported: `codex exec --sandbox workspace-write --cd <project>` (+ `--add-dir` per access path), no `--ignore-user-config`, no review feature disables — the user's ordinary configured model and effort apply; headless exec cannot ask for approval, so what the sandbox refuses fails | Native `-i/--image` attachment | Switches verified on the installed 0.155.1 `codex exec --help`; live-qualified (section 12) |
+| Claude Code | Supported: normal `claude --print --output-format text` (+ `--add-dir` per access path) with no permission flag — the user's settings and the ordinary default headless permission behavior decide; the review-only managed-MCP gate does not apply because work passes no `--strict-mcp-config` | File-reading route: Claude Code's own read tool presents the image when the request body names its absolute path | Live probe on 2.1.278 confirmed default-mode headless file creation; live-qualified |
+| ZCode | Supported: `--mode edit` with the real tool set (no review deny list) — edit mode allows workspace file edits; every other approval-needing tool is denied by the deny broker a headless prompt uses; the `--prompt` default `yolo` is never used | Native `--attach`, which the bundle reads and hands to the model as inline image content | Mode and deny-broker behavior read from the installed 0.16.9 bundle source; `--attach` pipeline verified in source; live-qualified |
+| MiniMax Code | Supported: `mcode exec --cwd <project> --permission smart` (the program's own headless default; `ask` needs a TUI, `full`/`off` are bypasses never selected), `--max-steps` only when the caller names one, `--file` per attachment | Native `--file` attachment, classified by MIME type into model image content (≤10 files, ≤100 MB) | Read from the installed 0.2.7 source; live-qualified |
+| Hermes Agent | Unsupported: one-shot `-z` auto-bypasses approvals by design (its own help says "approvals are auto-bypassed") and no other non-interactive route offers ordinary approvals | Unsupported: no attachment switch; the one-shot body is command-line text | Read from the installed 0.21.3 `hermes --help`; terminal route: run `hermes` in its own terminal |
+| Qwen Code | Unsupported: the ordinary approval mode (`default`) requires manual approval for file edits and shell commands and a headless run cannot ask (text mode cancels the call; stream-json would ask the calling host to approve, making Bridge the permission authority), while `auto-edit`/`auto`/`yolo` are automatic approvals Bridge will not select | Unsupported: the stream-json reader stringifies every non-text content block as JSON text rather than pixels, and there is no attachment switch | Read from the installed 0.23.0 bundle source; terminal route: run `qwen` in its own terminal |
+
+The `/` and `@` preprocessing exception of section 8 applies to every Qwen input, work included; no work route exists to carry it, and the finding above is the whole of Qwen's work story. Capability facts in `check --json` state these same truths, and a work session for an unsupported target is refused before request publication with the limitation and terminal route in the message.
+
+**Live work qualification, September 27, 2026, macOS 26 arm64.** One `qualify --mode work` run per supported route, each in a disposable fixture: a synthetic Git repository as the code directory, an `authorized-docs` access directory outside it, and one distinctive attachment image whose content appeared nowhere in the request text. Every run proved the production work vector, code reading from the code directory, a reversible document edit written inside the access directory only, the synthetic repository unchanged afterwards (tracked hashes, untracked set, HEAD, refs, config, clean status, no Git locks), released session locks, and full cleanup. Codex 0.155.1 identified a solid-magenta attachment from its pixels (`--image`); Claude Code 2.1.278 identified the same magenta image through its file-reading tool with the path named only in the request body (`--add-dir` widened access); ZCode 0.16.9 read block digits "3174" from a `--attach` image; MiniMax Code 0.2.7 read the same digits from a `--file` image. No work qualification is claimed for Hermes Agent or Qwen Code.
 
 ---
 
@@ -429,6 +576,7 @@ The complete authorized commands are:
 
 ```text
 /usr/bin/python3 -m unittest -v tests.test_fake_peer
+python3 -m unittest -v tests.test_work_mode
 python3 -m tests.release_conformance inspect
 python3 -m tests.release_conformance adapters
 python3 -m tests.release_conformance qualify --peer codex
@@ -438,6 +586,22 @@ python3 -m tests.release_conformance qualify --peer hermes
 python3 -m tests.release_conformance qualify --peer minimax
 python3 -m tests.release_conformance qualify --peer qwen
 ```
+
+The work-mode extension added one focused selection over the unchanged
+compatibility classes (`tests.test_fake_peer.FormatTwoRecords`,
+`.SixTargetConnectorBehavior`, `.CommandLineBody`, and the eleven listed
+`TurnBehavior` methods), the `tests.test_work_mode` module, and one live work
+qualification per route declared supported:
+
+```text
+python3 -m tests.release_conformance qualify --peer codex  --mode work
+python3 -m tests.release_conformance qualify --peer claude --mode work
+python3 -m tests.release_conformance qualify --peer zcode  --mode work
+python3 -m tests.release_conformance qualify --peer minimax --mode work
+```
+
+Hermes and Qwen declare no supported work route, so no work qualification is
+run or claimed for them.
 
 Each qualification includes readiness and one distinctive real model call. The approved transport correction's one additional Qwen-only qualification passed after local checks and independent review. No full suite, build, benchmark, all-pairs test, other repeated qualification, deliberate external-effect attempt, or duplicate reassurance pass is part of the ceiling. Application behavior is outside this boundary.
 

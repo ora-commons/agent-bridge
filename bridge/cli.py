@@ -1,9 +1,11 @@
-"""The frozen Format 2 command line and uniform failure rendering.
+"""The frozen Format 2 and Format 3 command line and uniform failure rendering.
 
-`check` asks whether one fixed target is ready without spending a model turn.
-`run` reads target and project only from its immutable session. `record` creates
-that session or writes a neutral note. Substantive Markdown always arrives on
-standard input.
+`check` asks whether one fixed target is ready without spending a model turn,
+prose by default or one JSON object with `--json`. `run` reads target, mode,
+and directories only from its immutable session. `record` creates that session
+or writes a neutral note. Substantive Markdown always arrives on standard
+input. Omitting every extended option keeps the original Format 2 behavior
+byte for byte.
 
 SPDX-License-Identifier: CC0-1.0
 """
@@ -12,13 +14,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import shutil
 import sys
 import tempfile
 from typing import Iterator, Optional, Sequence
 
 from . import connectors, record as record_module, runner
-from .errors import BridgeError, Failure
+from .errors import BridgeError, Failure, guidance
 from .peer import DEFAULT_TIMEOUT_SECONDS, Deadline, SignalStop
 
 PROGRAM = "agent-bridge"
@@ -45,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
         "check", help="report whether a target can be used right now"
     )
     check.add_argument("--peer", required=True)
+    check.add_argument("--mode", choices=("review", "work"))
+    check.add_argument("--json", action="store_true")
 
     run = subcommands.add_parser(
         "run", help="perform one bounded call for an existing session"
@@ -53,6 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     run.add_argument("--max-steps", type=int)
     run.add_argument("--require-model")
+    run.add_argument("--events-jsonl", action="store_true")
+    run.add_argument("--attachment", action="append")
+    run.add_argument("--note-ref")
+    run.add_argument("--purpose")
 
     record = subcommands.add_parser(
         "record", help="create a session or add one neutral note"
@@ -62,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--initiator")
     record.add_argument("--peer")
     record.add_argument("--project")
+    record.add_argument("--mode", choices=("review", "work"))
+    record.add_argument("--access-path", action="append")
 
     return parser
 
@@ -108,12 +119,69 @@ def _check_directory() -> Iterator[str]:
 
 def _check(args: argparse.Namespace) -> connectors.CheckResult:
     connector = connectors.resolve(args.peer)
+    mode = args.mode or "review"
     with _check_directory() as cwd:
+        if mode == "work":
+            return connector.check(Deadline(DEFAULT_TIMEOUT_SECONDS), cwd, mode="work")
         return connector.check(Deadline(DEFAULT_TIMEOUT_SECONDS), cwd)
 
 
-def _run(args: argparse.Namespace) -> str:
-    return runner.run_turn(
+def _check_json(args: argparse.Namespace) -> int:
+    """One machine-readable readiness result, success or failure alike.
+
+    The object carries the selected peer and mode, usability, the
+    executable/version/platform facts, tri-state authentication and work/image
+    capability, and warnings. It deliberately names no schema version: the
+    field set is the contract. A hard failure still exits nonzero, with the
+    reason and next action inside the object rather than on standard error.
+    """
+    mode = args.mode or "review"
+    result = {
+        "peer": args.peer,
+        "mode": mode,
+        "ready": False,
+        "warnings": [],
+    }  # type: dict
+    try:
+        checked = _check(args)
+        result.update(
+            {
+                "ready": True,
+                "executable": checked.executable,
+                "version": checked.version,
+                "platform": checked.platform,
+                "authentication": (
+                    "confirmed"
+                    if checked.authentication_confirmed
+                    else "unknown"
+                ),
+            }
+        )
+        capability = connectors.resolve(args.peer).CAPABILITIES
+        result["work"] = capability.work
+        result["image"] = capability.image
+        result["warnings"] = list(checked.warnings)
+        if capability.work == "unsupported":
+            result["warnings"].append(capability.work_detail)
+        if capability.image == "unsupported":
+            result["warnings"].append(capability.image_detail)
+    except BridgeError as error:
+        reason, next_action = guidance(error.failure)
+        if error.detail:
+            reason = "{0} ({1})".format(reason, error.detail)
+        result["reason"] = reason
+        result["next_action"] = next_action
+        if error.failure == Failure.AUTHENTICATION_REQUIRED:
+            result["authentication"] = "required"
+    sys.stdout.write(json.dumps(result, ensure_ascii=True) + "\n")
+    return 0 if result["ready"] else 1
+
+
+def _run(args: argparse.Namespace) -> Optional[str]:
+    event_writer = None
+    if args.events_jsonl:
+        event_writer = lambda event: sys.stdout.write(event)
+    result = runner.run_turn(
         session_dir=args.session,
         body=_read_body(),
         timeout_seconds=args.timeout,
@@ -122,7 +190,16 @@ def _run(args: argparse.Namespace) -> str:
         ),
         max_steps=args.max_steps,
         required_model=args.require_model,
-    ).response_path
+        attachments=tuple(args.attachment or ()),
+        note_ref=args.note_ref,
+        purpose=args.purpose,
+        event_writer=event_writer,
+    )
+    if args.events_jsonl:
+        # The finished event already carried the response path; the line a
+        # flag-free run prints would only duplicate it on the event stream.
+        return None
+    return result.response_path
 
 
 def _record(args: argparse.Namespace) -> str:
@@ -133,6 +210,8 @@ def _record(args: argparse.Namespace) -> str:
         initiator=args.initiator,
         peer=args.peer,
         project=args.project,
+        mode=args.mode,
+        access_paths=tuple(args.access_path) if args.access_path else None,
     )
 
 
@@ -145,6 +224,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 Failure.USAGE_ERROR, detail="name a command: check, run, record"
             )
         if args.command == "check":
+            if args.json:
+                return _check_json(args)
             checked = _check(args)
             sys.stdout.write(checked.message + "\n")
             for warning in checked.warnings:
@@ -160,5 +241,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except BridgeError as error:
         sys.stderr.write(str(error) + "\n")
         return 1
-    sys.stdout.write(written + "\n")
+    if written is not None:
+        sys.stdout.write(written + "\n")
     return 0

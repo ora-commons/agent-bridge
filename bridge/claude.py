@@ -1,15 +1,18 @@
-"""Calling Claude Code with its strongest practical read-only posture.
+"""Calling Claude Code with its strongest practical read-only posture, and its normal work posture.
 
 Claude Code is Anthropic's own command-line program for its coding agent. This
 module is the whole of what Agent Bridge knows about it: which program to start,
 which switches must be on it, and how to tell - without spending a model turn -
 whether starting it would work at all.
 
-There are two operations here and nothing else. `check` answers whether Claude
+There are three operations here and nothing else. `check` answers whether Claude
 Code could be used right now. `build_command` composes the one fixed argument
-vector a turn runs. Both do the same inexpensive prerequisites first, because a
-turn that skipped them would find out about a missing sign-in or a renamed
-switch in the middle of real work, with the peer already running.
+vector a review turn runs. `build_work_command` composes the normal `--print`
+route a work turn runs. All of them do the same inexpensive prerequisites first
+(the work ones skipping the review-only managed-MCP gate and adding the work
+vector's own switch), because a turn that skipped them would find out about a
+missing sign-in or a renamed switch in the middle of real work, with the peer
+already running.
 
 **How the answer comes back.** `--print` with no prompt argument reads the
 prompt from standard input, and `--output-format text` puts the final answer,
@@ -76,7 +79,7 @@ import errno
 import json
 import os
 import pwd
-from typing import List, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from . import connectors
 from .errors import BridgeError, Failure
@@ -108,6 +111,51 @@ QUALIFICATION = connectors.Qualification(
 #: inside them. Passed as one comma-separated value so the option cannot go on
 #: swallowing the switches that follow it.
 READ_ONLY_TOOLS = "Read,Glob,Grep"
+
+#: What this connector offers beyond its restricted review call. Work is the
+#: normal `claude --print` route with no permission flag at all - whatever the
+#: user's own settings and Claude Code's ordinary default permission behavior
+#: allow is what the call may do. Images have no attachment switch on this
+#: CLI; the one qualified route is Claude Code's own file-reading tool, which
+#: presents an image to the model when the request body names its path.
+CAPABILITIES = connectors.Capabilities(
+    work="supported",
+    work_detail=(
+        "work uses the normal claude --print route with no permission flag, "
+        "so the user's settings and Claude Code's ordinary default permission "
+        "behavior decide what the call may do; --add-dir widens tool access "
+        "to declared access directories"
+    ),
+    image="supported",
+    image_detail=(
+        "images travel by Claude Code's own file-reading tool: the request "
+        "body must name the attached image's absolute path, and the model "
+        "reads the pixels with it"
+    ),
+)
+
+#: The switch beyond the review set that a work turn relies on, verified
+#: against the installed program's own help before any request is published.
+WORK_RESTRICTIONS = (
+    "--add-dir",
+)
+
+WORK_WARNING = (
+    "Claude Code work runs on its normal route: user, project, and local "
+    "settings files apply (the review call's --restricted ignored them), "
+    "administrator-managed and remote policy can still add hooks or other "
+    "external effects, and no permission flag is passed, so the permission "
+    "behavior is whatever the user's own configuration and Claude Code's "
+    "default headless policy make it. In a --print call nobody can answer an "
+    "interactive permission prompt, so a tool the configuration does not "
+    "allow is denied rather than asked about."
+)
+
+IMAGE_ROUTE_WARNING = (
+    "This attachment reaches the model only through Claude Code's "
+    "file-reading tool, so the request body must name the image's absolute "
+    "path; recording the attachment alone does not deliver pixels."
+)
 
 # Claude Code 2.1.251's own policy loader and current official documentation
 # agree on these macOS sources. Restricted mode deliberately keeps the
@@ -315,16 +363,18 @@ def _signed_in(status: CompletedCall) -> str:
 
 
 def _prerequisites(
-    deadline: Deadline, cwd: str
+    deadline: Deadline, cwd: str, work: bool = False
 ) -> Tuple[str, str, str, str, Tuple[str, ...]]:
     """Everything that has to be true before starting Claude Code is worth doing.
 
     Six questions in order, each one cheap and none of them a model turn: is
-    the program here, is the exact managed MCP source absent, is its version
-    one this connector was tested against, is this computer one it was tested
-    on, is somebody signed in, and does the installed version still have every
-    switch the turn relies on. Any of them failing raises, so nothing further
-    happens.
+    the program here, is the exact managed MCP source absent (a review-call
+    requirement only, because the strict-MCP switch that cannot be combined
+    with it is a review switch), is its version one this connector was tested
+    against, is this computer one it was tested on, is somebody signed in, and
+    does the installed version still have every switch the turn relies on -
+    the review set, plus the work set when a work turn is being composed. Any
+    of them failing raises, so nothing further happens.
 
     Returns the four facts a readiness report needs and a turn uses: where the
     program is, which version answered, how this computer describes itself, and
@@ -332,7 +382,8 @@ def _prerequisites(
     """
     warnings = []  # type: List[str]
     program = connectors.executable(QUALIFICATION.cli_identity)
-    _require_managed_mcp_absent()
+    if not work:
+        _require_managed_mcp_absent()
     version = connectors.qualified_version(
         connectors.probe((program, "--version"), cwd, deadline).stdout,
         QUALIFICATION,
@@ -348,18 +399,30 @@ def _prerequisites(
     )
     remote_policy = _remote_managed_settings_fact(program, deadline, cwd)
 
-    connectors.qualified_restrictions(
-        connectors.probe((program, "--help"), cwd, deadline),
-        QUALIFICATION,
-    )
-    warnings.append(
-        "Claude Code's --restricted, strict empty MCP, read-only tool, and "
-        "planning posture still keeps administrator-managed endpoint and "
-        "remote policy, which can add hooks or other external effects; "
-        "{0}; {1}.".format(
-            endpoint_policy, remote_policy
+    help_call = connectors.probe((program, "--help"), cwd, deadline)
+    connectors.qualified_restrictions(help_call, QUALIFICATION)
+    if work:
+        connectors.qualified_restrictions(
+            help_call,
+            connectors.Qualification(
+                cli_identity=QUALIFICATION.cli_identity,
+                versions=QUALIFICATION.versions,
+                os_family=QUALIFICATION.os_family,
+                os_major_versions=QUALIFICATION.os_major_versions,
+                architectures=QUALIFICATION.architectures,
+                restrictions=WORK_RESTRICTIONS,
+            ),
         )
-    )
+        warnings.append(WORK_WARNING)
+    else:
+        warnings.append(
+            "Claude Code's --restricted, strict empty MCP, read-only tool, and "
+            "planning posture still keeps administrator-managed endpoint and "
+            "remote policy, which can add hooks or other external effects; "
+            "{0}; {1}.".format(
+                endpoint_policy, remote_policy
+            )
+        )
     return (
         program,
         version,
@@ -369,15 +432,20 @@ def _prerequisites(
     )
 
 
-def check(deadline: Deadline, cwd: str) -> connectors.CheckResult:
+def check(
+    deadline: Deadline, cwd: str, mode: str = "review"
+) -> connectors.CheckResult:
     """Report whether Claude Code could be used right now, spending no turn.
 
     `cwd` is a neutral directory made for this command, so the questions below
     are asked somewhere with nothing in it. No real project is touched, nothing
     is installed, nobody is logged in, no model or provider is chosen, and
-    nothing is written down for next time.
+    nothing is written down for next time. A work-mode check proves the work
+    vector's own switches exist on the installed version.
     """
-    program, version, described, account, warnings = _prerequisites(deadline, cwd)
+    program, version, described, account, warnings = _prerequisites(
+        deadline, cwd, work=(mode == "work")
+    )
     return connectors.readiness(
         HARNESS_ID, program, version, described, account, warnings
     )
@@ -413,6 +481,43 @@ def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
             "--output-format",
             "text",
         ),
+        cwd=cwd,
+        env=connectors.environment(),
+        warnings=warnings,
+    )
+
+
+def build_work_command(
+    deadline: Deadline,
+    cwd: str,
+    access_paths: Sequence[str] = (),
+    attachments: Sequence[str] = (),
+    max_steps: Optional[int] = None,
+    required_model: Optional[str] = None,
+) -> connectors.PeerCommand:
+    """The normal `claude --print` route, with no permission flag passed.
+
+    None of the review call's restrictions travel into a work turn: not the
+    restricted mode, not the empty strict MCP set, not the read-only tool
+    list, not the planning permission mode. What the call may do is exactly
+    what the user's own settings and Claude Code's ordinary default headless
+    permission behavior allow - headless calls cannot answer an interactive
+    prompt, so a tool the configuration does not permit is denied rather than
+    asked about. `--add-dir` widens tool access to each declared access
+    directory. An attached image has no switch on this CLI: it reaches the
+    model through Claude Code's file-reading tool when the request body names
+    its path, so that truth is warned about whenever one is attached.
+    """
+    program, _version, _described, _account, warnings = _prerequisites(
+        deadline, cwd, work=True
+    )
+    argv = [program, "--print", "--output-format", "text"]
+    for path in access_paths:
+        argv.extend(("--add-dir", path))
+    if attachments:
+        warnings = tuple(warnings) + (IMAGE_ROUTE_WARNING,)
+    return connectors.PeerCommand(
+        argv=tuple(argv),
         cwd=cwd,
         env=connectors.environment(),
         warnings=warnings,

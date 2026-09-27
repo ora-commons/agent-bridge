@@ -5,6 +5,15 @@ request. It then starts one fresh target process, publishes one final textual
 answer, and exits. A failed target leaves the truthful request and no invented
 response. There is no retry or implicit history.
 
+A Format 3 session may be a work session: the runner hands the connector's
+work builder the session's declared directories and explicit attachments,
+publishes the caller's inert note reference and purpose in the request header,
+and marks the response with the request sequence it answers. A caller that
+asked for lifecycle events gets `started`, periodic `heartbeat` check-ins, and
+one `finished` event - the last only after durable publication or an honest
+failure, so a broken event pipe can never make an unfinished call look
+finished.
+
 SPDX-License-Identifier: CC0-1.0
 """
 
@@ -17,7 +26,16 @@ import os
 import re
 import shutil
 import tempfile
-from typing import Callable, Iterator, NamedTuple, Optional, Tuple
+from typing import (
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from . import connectors, session as session_module
 from .connectors import (
@@ -26,9 +44,9 @@ from .connectors import (
     argument_space_limit,
     argument_space_used,
 )
-from .errors import BridgeError, Failure
+from .errors import BridgeError, Failure, guidance
 from .locking import session_lock
-from .peer import Deadline, run_bounded
+from .peer import Deadline, SignalStop, run_bounded
 
 NEUTRAL_PREFIX = "agent-bridge-neutral-"
 
@@ -36,7 +54,10 @@ NEUTRAL_PREFIX = "agent-bridge-neutral-"
 # function directly. No command-line, environment, file, or configuration path
 # exposes this seam.
 CommandBuilder = Callable[[Deadline, str], PeerCommand]
+WorkCommandBuilder = Callable[..., PeerCommand]
 WarningWriter = Callable[[str], None]
+#: Receives one already-serialized event line, newline included.
+EventWriter = Callable[[str], None]
 
 # Failure output is useful only when it is safe to show and small enough to
 # read. Remove echoed requests and common credential shapes before shortening
@@ -199,6 +220,53 @@ class TurnResult(NamedTuple):
     response_path: str
 
 
+class _EventReporter(object):
+    """Write lifecycle events as one JSON object per line, surviving a break.
+
+    The events are a view of the turn, not a part of it: if the pipe they are
+    written to goes away, the turn runs on and its records decide what is
+    true. A write that fails is remembered and nothing further is written, so
+    a broken event pipe can neither kill an otherwise healthy call nor - the
+    thing that matters - turn an unfinished one into a reported success.
+    """
+
+    def __init__(self, writer: Callable[[str], None]) -> None:
+        self._writer = writer
+        self._broken = False
+
+    def emit(self, event: Dict[str, object]) -> None:
+        if self._broken:
+            return
+        try:
+            self._writer(json.dumps(event, ensure_ascii=True) + "\n")
+        except OSError:
+            self._broken = True
+
+
+def _attachments_error(path: str, option: str) -> BridgeError:
+    if not os.path.isabs(path):
+        return BridgeError(
+            Failure.USAGE_ERROR,
+            detail="{0} must be an absolute path: {1}".format(option, path),
+        )
+    return BridgeError(
+        Failure.USAGE_ERROR,
+        detail="{0} is not an existing file: {1}".format(option, path),
+    )
+
+
+def _validate_attachments(
+    attachments: Sequence[str],
+) -> Tuple[str, ...]:
+    """Every attachment must be an absolute existing file, checked in order."""
+    checked = []
+    for path in attachments:
+        if not os.path.isabs(path) or not os.path.isfile(path):
+            raise _attachments_error(path, "--attachment")
+        checked.append(path)
+    return tuple(checked)
+
+
 def run_turn(
     session_dir: str,
     body: str,
@@ -207,6 +275,11 @@ def run_turn(
     warning_writer: Optional[WarningWriter] = None,
     max_steps: Optional[int] = None,
     required_model: Optional[str] = None,
+    attachments: Sequence[str] = (),
+    note_ref: Optional[str] = None,
+    purpose: Optional[str] = None,
+    event_writer: Optional[EventWriter] = None,
+    build_work_command: Optional[WorkCommandBuilder] = None,
 ) -> TurnResult:
     """Publish one request and one response for the session's fixed target."""
     try:
@@ -232,91 +305,252 @@ def run_turn(
             detail="--max-steps and --require-model are available only for a "
             "session whose recorded target is minimax",
         )
-    if record.project is not None and connectors.is_courier_only(record.peer):
+
+    extended = bool(attachments) or note_ref is not None or purpose is not None
+    if extended and record.bridge_format != session_module.FORMAT_3:
         raise BridgeError(
             Failure.USAGE_ERROR,
-            detail="the session records a project for {0}, which is courier-only; "
-            "include the needed evidence in the body or choose a project-capable "
-            "target".format(record.peer),
+            detail="--attachment, --note-ref, and --purpose require a Format 3 "
+            "session created with an explicit --mode",
         )
-    connector = connectors.resolve(record.peer)
-    if has_minimax_options:
-        connector.validate_run_options(max_steps, required_model)
+    if note_ref is not None:
+        session_module.validate_inline_value("--note-ref", note_ref)
+    if purpose is not None:
+        session_module.validate_inline_value("--purpose", purpose)
+    if attachments and record.mode != "work":
+        raise BridgeError(
+            Failure.USAGE_ERROR,
+            detail="--attachment is available only in a work session whose "
+            "target has a qualified image route",
+        )
+    declared_attachments = _validate_attachments(attachments)
 
-    with session_lock(session_dir):
-        with _target_directory(record.project) as cwd:
-            deadline.check("composing the peer command")
-            if has_minimax_options:
-                builder = build_command or connector.build_command
-                command = builder(
-                    deadline,
-                    cwd,
-                    max_steps=max_steps,
-                    required_model=required_model,
-                )
-            elif build_command is None:
-                command = connector.build_command(deadline, cwd)
+    if record.mode == "work":
+        connector = connectors.resolve(record.peer)
+        capability = connector.CAPABILITIES
+        if capability.work != "supported":
+            raise BridgeError(
+                Failure.USAGE_ERROR,
+                detail="work mode is unsupported for {0}: {1}".format(
+                    record.peer, capability.work_detail
+                ),
+            )
+        if declared_attachments and capability.image != "supported":
+            raise BridgeError(
+                Failure.USAGE_ERROR,
+                detail="{0} has no qualified image route: {1}".format(
+                    record.peer, capability.image_detail
+                ),
+            )
+        if has_minimax_options:
+            connector.validate_run_options(max_steps, required_model)
+    else:
+        if record.project is not None and connectors.is_courier_only(record.peer):
+            raise BridgeError(
+                Failure.USAGE_ERROR,
+                detail="the session records a project for {0}, which is "
+                "courier-only; include the needed evidence in the body or "
+                "choose a project-capable target".format(record.peer),
+            )
+        connector = connectors.resolve(record.peer)
+        if has_minimax_options:
+            connector.validate_run_options(max_steps, required_model)
+
+    events = (
+        _EventReporter(event_writer) if event_writer is not None else None
+    )
+    published_request = None  # type: Optional[str]
+    turn_warnings = []  # type: List[str]
+
+    def report(event: Dict[str, object]) -> None:
+        if events is not None:
+            events.emit(event)
+
+    def heartbeat(phase: str):
+        def beat(elapsed: float, child_running: bool) -> None:
+            report(
+                {
+                    "event": "heartbeat",
+                    "phase": phase,
+                    "elapsed_seconds": round(elapsed, 3),
+                    "child_running": bool(child_running),
+                }
+            )
+
+        return beat
+
+    def finished_failure(exc: BaseException) -> None:
+        if isinstance(exc, (SignalStop, KeyboardInterrupt)):
+            outcome = "stopped"
+            detail = {
+                "outcome": outcome,
+                "reason": str(exc) or exc.__class__.__name__,
+            }
+        else:
+            outcome = "failure"
+            if isinstance(exc, BridgeError):
+                reason, next_action = guidance(exc.failure)
+                if exc.detail:
+                    reason = "{0} ({1})".format(reason, exc.detail)
             else:
-                command = build_command(deadline, cwd)
-            deadline.check("composing the peer command")
-            if os.path.abspath(command.cwd) != os.path.abspath(cwd):
-                raise BridgeError(
-                    Failure.SESSION_INVALID,
-                    detail="the connector did not use the session-derived directory",
+                reason = str(exc) or exc.__class__.__name__
+                next_action = (
+                    "Inspect the session's visible state before deciding "
+                    "whether to run the command again."
                 )
-            argv, stdin_text = apply_transport(command, body)
+            detail = {
+                "outcome": outcome,
+                "reason": reason,
+                "next_action": next_action,
+            }
+        event = {
+            "event": "finished",
+            "phase": "run",
+            "warnings": list(turn_warnings),
+        }
+        event.update(detail)
+        if published_request is not None:
+            event["request_path"] = published_request
+        report(event)
 
-            request_sequence = session_module.next_sequence(session_dir)
-            if warning_writer is not None:
-                for warning in command.warnings:
-                    warning_writer(warning)
-            session_module.publish(
-                session_module.message_path(
-                    session_dir,
-                    request_sequence,
-                    session_module.INITIATOR_TO_PEER_SUFFIX,
-                ),
-                session_module.initiator_to_peer_text(
-                    request_sequence, record.initiator, record.peer, body
-                ),
-            )
-
-            call = run_bounded(
-                argv=argv,
-                cwd=command.cwd,
-                env=command.env,
-                stdin_text=stdin_text,
-                deadline=deadline,
-            )
-            if call.returncode != 0:
-                raise BridgeError(
-                    Failure.PEER_FAILURE,
-                    detail=_peer_failure_detail(call, command, body),
-                )
-            response = call.stdout
-            if command.response_parser is not None:
-                try:
-                    response = command.response_parser(response)
-                except BridgeError as parsed:
+    try:
+        report(
+            {
+                "event": "started",
+                "phase": "run",
+                "peer": record.peer,
+                "mode": record.mode,
+            }
+        )
+        with session_lock(session_dir):
+            with _target_directory(record.project) as cwd:
+                deadline.check("composing the peer command")
+                deadline.heartbeat = heartbeat("prerequisites")
+                if record.mode == "work":
+                    builder = (
+                        build_work_command
+                        if build_work_command is not None
+                        else connector.build_work_command
+                    )
+                    command = builder(
+                        deadline,
+                        cwd,
+                        access_paths=record.access_paths,
+                        attachments=declared_attachments,
+                        max_steps=max_steps,
+                        required_model=required_model,
+                    )
+                elif has_minimax_options:
+                    builder = build_command or connector.build_command
+                    command = builder(
+                        deadline,
+                        cwd,
+                        max_steps=max_steps,
+                        required_model=required_model,
+                    )
+                elif build_command is None:
+                    command = connector.build_command(deadline, cwd)
+                else:
+                    command = build_command(deadline, cwd)
+                deadline.check("composing the peer command")
+                if os.path.abspath(command.cwd) != os.path.abspath(cwd):
                     raise BridgeError(
-                        parsed.failure,
-                        detail=_diagnostic_excerpt(parsed.detail or str(parsed), body),
-                    ) from None
-            if not response.strip():
-                raise BridgeError(Failure.EMPTY_RESPONSE, detail=command.argv[0])
+                        Failure.SESSION_INVALID,
+                        detail="the connector did not use the session-derived directory",
+                    )
+                argv, stdin_text = apply_transport(command, body)
 
-            response_sequence = session_module.next_sequence(session_dir)
-            response_path = session_module.publish(
-                session_module.message_path(
-                    session_dir,
-                    response_sequence,
-                    session_module.PEER_TO_INITIATOR_SUFFIX,
-                ),
-                session_module.peer_to_initiator_text(
-                    response_sequence, record.peer, record.initiator, response
-                ),
-            )
+                request_sequence = session_module.next_sequence(session_dir)
+                if warning_writer is not None:
+                    for warning in command.warnings:
+                        warning_writer(warning)
+                turn_warnings.extend(command.warnings)
+                published_request = session_module.publish(
+                    session_module.message_path(
+                        session_dir,
+                        request_sequence,
+                        session_module.INITIATOR_TO_PEER_SUFFIX,
+                    ),
+                    session_module.initiator_to_peer_text(
+                        request_sequence,
+                        record.initiator,
+                        record.peer,
+                        body,
+                        note_ref=note_ref,
+                        purpose=purpose,
+                        attachments=declared_attachments,
+                    ),
+                )
 
+                deadline.heartbeat = heartbeat("peer-call")
+                call = run_bounded(
+                    argv=argv,
+                    cwd=command.cwd,
+                    env=command.env,
+                    stdin_text=stdin_text,
+                    deadline=deadline,
+                )
+                if call.returncode != 0:
+                    raise BridgeError(
+                        Failure.PEER_FAILURE,
+                        detail=_peer_failure_detail(call, command, body),
+                    )
+                response = call.stdout
+                if command.response_parser is not None:
+                    try:
+                        response = command.response_parser(response)
+                    except BridgeError as parsed:
+                        raise BridgeError(
+                            parsed.failure,
+                            detail=_diagnostic_excerpt(
+                                parsed.detail or str(parsed), body
+                            ),
+                        ) from None
+                if not response.strip():
+                    raise BridgeError(
+                        Failure.EMPTY_RESPONSE, detail=command.argv[0]
+                    )
+
+                response_sequence = session_module.next_sequence(session_dir)
+                response_path = session_module.publish(
+                    session_module.message_path(
+                        session_dir,
+                        response_sequence,
+                        session_module.PEER_TO_INITIATOR_SUFFIX,
+                    ),
+                    session_module.peer_to_initiator_text(
+                        response_sequence,
+                        record.peer,
+                        record.initiator,
+                        response,
+                        answers=(
+                            request_sequence
+                            if record.bridge_format
+                            == session_module.FORMAT_3
+                            else None
+                        ),
+                    ),
+                )
+    except SignalStop as stopped:
+        finished_failure(stopped)
+        raise
+    except KeyboardInterrupt as interrupted:
+        finished_failure(interrupted)
+        raise
+    except BaseException as failed:
+        finished_failure(failed)
+        raise
+
+    report(
+        {
+            "event": "finished",
+            "phase": "run",
+            "outcome": "success",
+            "request_path": published_request,
+            "response_path": response_path,
+            "warnings": list(turn_warnings),
+        }
+    )
     return TurnResult(
         request_sequence=request_sequence,
         response_sequence=response_sequence,

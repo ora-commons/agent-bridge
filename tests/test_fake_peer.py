@@ -2106,6 +2106,10 @@ class SixTargetConnectorBehavior(unittest.TestCase):
             warning_writer=mock.ANY,
             max_steps=2,
             required_model="minimax/MiniMax-M3",
+            attachments=(),
+            note_ref=None,
+            purpose=None,
+            event_writer=None,
         )
 
         minimax_session = os.path.join(self.temp, "minimax-options")
@@ -3162,7 +3166,32 @@ class CommandLineBody(unittest.TestCase):
     def test_command_surface_rejects_removed_run_and_record_arguments(self):
         self.assertEqual(
             release_conformance._command_options(cli.build_parser())["run"],
-            {"--session", "--timeout", "--max-steps", "--require-model"},
+            {
+                "--session",
+                "--timeout",
+                "--max-steps",
+                "--require-model",
+                "--events-jsonl",
+                "--attachment",
+                "--note-ref",
+                "--purpose",
+            },
+        )
+        self.assertEqual(
+            release_conformance._command_options(cli.build_parser())["check"],
+            {"--peer", "--mode", "--json"},
+        )
+        self.assertEqual(
+            release_conformance._command_options(cli.build_parser())["record"],
+            {
+                "--session",
+                "--kind",
+                "--initiator",
+                "--peer",
+                "--project",
+                "--mode",
+                "--access-path",
+            },
         )
         removed = (
             ["run", "--session", self.session_dir, "--peer", "hermes"],

@@ -7,6 +7,10 @@ hidden, while putting transient output inside the task-owned neutral directory
 and disabling compatible usage statistics and telemetry for this child. Qwen
 alone may preprocess the unchanged body before the model; that exception is
 reported explicitly rather than hidden behind the later zero-tool-call budget.
+There is deliberately no work builder and no image route: `CAPABILITIES`
+records the source-read reasons (approval modes that either cannot ask
+headlessly or auto-approve, and a stream-json reader that stringifies
+non-text content), so work mode is refused with that finding instead of built.
 
 SPDX-License-Identifier: CC0-1.0
 """
@@ -92,12 +96,40 @@ BOUNDARY_WARNING = (
     "writes to Qwen, cache, temporary, and task-owned paths, and outbound "
     "network access; Qwen's bundled skills still load and can shape the turn. "
     "Plan mode plus "
-    "--max-tool-calls=0 prevents model-initiated tool execution and aborts the "
-    "run on the first such attempt. "
+    "--max-tool-calls=0 prevents model-initiated tool execution and aborts "
+    "the run on the first such attempt. "
     "QWEN_HOME remains visible so the user's existing authentication and "
     "provider selection can work, and live authentication cannot be confirmed "
     "without the bounded model call. The configured model-provider connection "
     "and same-user CLI read access remain outside Agent Bridge confinement."
+)
+
+#: What this connector offers beyond its restricted review call: nothing, and
+#: for stated reasons read out of the installed program. Qwen Code 0.23.0's
+#: ordinary approval mode (`--approval-mode default`) requires manual approval
+#: for file edits and shell commands, and a headless run cannot ask: in text
+#: mode the call is cancelled with "the host could not present the required
+#: approval", and in stream-json mode the program asks the calling host to
+#: approve, which would make Bridge the permission authority. The modes that
+#: proceed unattended (`auto-edit`, `auto`, `yolo`) are automatic approval
+#: modes, which Bridge must not enable to make headless work succeed. For
+#: images, the stream-json reader turns every non-text content block into
+#: JSON text rather than pixels, and there is no attachment switch.
+CAPABILITIES = connectors.Capabilities(
+    work="unsupported",
+    work_detail=(
+        "Qwen Code's ordinary approval mode (default) requires manual "
+        "approval for file edits and shell commands and a headless run cannot "
+        "ask, while its unattended modes (auto-edit, auto, yolo) are "
+        "automatic approvals Bridge will not select; run qwen in its own "
+        "terminal for interactive work, or choose a work-capable target"
+    ),
+    image="unsupported",
+    image_detail=(
+        "Qwen Code's headless stream-json input turns every non-text content "
+        "block into JSON text instead of pixels and the CLI has no attachment "
+        "switch, so no qualified image route exists"
+    ),
 )
 
 
@@ -207,7 +239,9 @@ def _prerequisites(
     )
 
 
-def check(deadline: Deadline, cwd: str) -> connectors.CheckResult:
+def check(
+    deadline: Deadline, cwd: str, mode: str = "review"
+) -> connectors.CheckResult:
     program, version, described, account, warnings = _prerequisites(deadline, cwd)
     return connectors.readiness(
         HARNESS_ID,

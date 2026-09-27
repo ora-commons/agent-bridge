@@ -198,6 +198,15 @@ def render(failure: Failure, detail: Optional[str] = None) -> str:
     return "{0} Next action: {1}".format(reason, next_action)
 
 
+def guidance(failure: Failure) -> Tuple[str, str]:
+    """The plain reason and the single next action for one failure.
+
+    For the structured readiness and event results, which report the two
+    separately rather than as one sentence.
+    """
+    return _GUIDANCE[failure]
+
+
 class BridgeError(Exception):
     """One failure, carried out to whoever renders the message.
 
