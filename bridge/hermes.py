@@ -7,9 +7,12 @@ spending a model turn - whether starting it would work at all.
 
 There are two operations here and nothing else. `check` answers whether Hermes
 could be used right now. `build_command` composes the one fixed argument vector
-a turn runs. Both do the same inexpensive prerequisites first, because a turn
-that skipped them would find out about a missing sign-in or a renamed switch in
-the middle of real work, with the peer already running.
+a review turn runs. There is deliberately no work builder: one-shot Hermes
+auto-bypasses approvals (see `CAPABILITIES` for the full finding), so work mode
+is refused with that reason instead of built. Both operations do the same
+inexpensive prerequisites first, because a turn that skipped them would find
+out about a missing sign-in or a renamed switch in the middle of real work,
+with the peer already running.
 
 **A courier, not a reviewer.** Hermes switches tools on and off in whole
 groups, and the group that reads a file is the group that writes one: `file`
@@ -160,6 +163,30 @@ WARNING = (
     "and may be visible to other processes under the same account or to logs."
 )
 
+#: What this connector offers beyond its restricted review call: nothing, and
+#: for a stated reason rather than an untested one. Hermes Agent 0.21.3's own
+#: help text says of one-shot mode that "approvals are auto-bypassed", and
+#: that is the only non-interactive route the program offers; `--yolo` and
+#: `--accept-hooks` are further bypasses, and the interactive `chat` command
+#: needs a terminal this courier does not own. There is no headless Hermes
+#: invocation whose ordinary approvals survive, so work is reported
+#: unsupported with the terminal route that can do it instead.
+CAPABILITIES = connectors.Capabilities(
+    work="unsupported",
+    work_detail=(
+        "Hermes Agent's one-shot -z route auto-bypasses approvals by design "
+        "(its own help: \"approvals are auto-bypassed\"), no other "
+        "non-interactive route offers ordinary approvals, and Bridge will "
+        "not select a bypassing mode; run hermes in its own terminal for "
+        "interactive work, or choose a work-capable target"
+    ),
+    image="unsupported",
+    image_detail=(
+        "Hermes Agent has no image attachment switch and its one-shot body "
+        "travels as command-line text, so no qualified image route exists"
+    ),
+)
+
 
 def _environment() -> Tuple[Tuple[str, str], ...]:
     """This process's environment with the one redirecting name taken out."""
@@ -239,13 +266,17 @@ def _prerequisites(
     return program, version, described, account, tuple(warnings)
 
 
-def check(deadline: Deadline, cwd: str) -> connectors.CheckResult:
+def check(
+    deadline: Deadline, cwd: str, mode: str = "review"
+) -> connectors.CheckResult:
     """Report whether Hermes could be used right now, spending no model turn.
 
     `cwd` is a neutral directory made for this command, so the questions below
     are asked somewhere with nothing in it. No real project is touched, nothing
     is installed, nobody is logged in, no model or provider is chosen, and
-    nothing is written down for next time.
+    nothing is written down for next time. A work-mode check answers the same
+    review mechanics; the connector's declared capabilities carry the fact
+    that work mode itself is unsupported, rather than the check failing.
     """
     program, version, described, account, warnings = _prerequisites(deadline, cwd)
     return connectors.readiness(

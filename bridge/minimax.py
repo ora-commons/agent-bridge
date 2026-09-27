@@ -2,8 +2,11 @@
 
 MiniMax Code 0.2.7 has a stable headless ``mcode exec`` transport, but no
 headless permission mode that confines its tools. Agent Bridge therefore gives
-it only a task-owned neutral directory and reports the remaining tool and
-configuration authority instead of presenting ``smart`` as a sandbox.
+its review calls only a task-owned neutral directory and reports the remaining
+tool and configuration authority instead of presenting ``smart`` as a sandbox.
+Work calls use the same ``exec`` with its ordinary defaults: ``smart`` is the
+program's own default permission policy, the workspace comes from ``--cwd``,
+and the review-only one-step bound is not imposed.
 
 SPDX-License-Identifier: CC0-1.0
 """
@@ -12,7 +15,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from . import connectors
 from .errors import BridgeError, Failure
@@ -36,6 +39,44 @@ QUALIFICATION = connectors.Qualification(
         "--max-steps",
         "--output-format",
     ),
+)
+
+#: What this connector offers beyond its restricted review call. Work is the
+#: ordinary `mcode exec` invocation: `smart` is the program's own default
+#: permission policy for a headless run (its source rejects only `ask`, which
+#: needs a TUI), the workspace comes from `--cwd`, and no assistant-step bound
+#: is imposed unless the caller names one. Images have a native attachment
+#: switch; mcode's source turns image MIME types into model image content.
+CAPABILITIES = connectors.Capabilities(
+    work="supported",
+    work_detail=(
+        "work uses mcode exec with the caller's project as --cwd, its "
+        "ordinary default permission policy smart (ask needs an interactive "
+        "host; full and off are approval bypasses Bridge never selects), and "
+        "no imposed assistant-step bound unless --max-steps names one"
+    ),
+    image="supported",
+    image_detail=(
+        "images travel as native mcode exec --file attachments, which mcode "
+        "classifies by MIME type and hands to the model as image content "
+        "(at most 10 files and 100 MB per run)"
+    ),
+)
+
+#: The switch beyond the review set that a work turn relies on, verified
+#: against the installed program's own help before any request is published.
+WORK_RESTRICTIONS = (
+    "--file",
+)
+
+WORK_WARNING = (
+    "MiniMax Code work runs with the program's ordinary headless defaults: "
+    "--permission smart is a discretionary permission mode, not a sandbox, so "
+    "the model's tool use is governed by MiniMax's own policy engine and by "
+    "surviving user/provider configuration, and no assistant-step bound is "
+    "imposed unless --max-steps names one, so the turn deadline is the only "
+    "outer bound. Writes are confined by nothing except that policy; treat "
+    "the working and access directories as writable."
 )
 
 WARNING = (
@@ -115,7 +156,7 @@ def parse_response(output: str, required_model: str) -> str:
 
 
 def _prerequisites(
-    deadline: Deadline, cwd: str
+    deadline: Deadline, cwd: str, work: bool = False
 ) -> Tuple[str, str, str, str, Tuple[str, ...]]:
     warnings = []  # type: List[str]
     program = connectors.executable(QUALIFICATION.cli_identity)
@@ -125,11 +166,23 @@ def _prerequisites(
         warnings,
     )
     described = connectors.qualified_platform(QUALIFICATION, warnings)
-    connectors.qualified_restrictions(
-        connectors.probe((program, "exec", "--help"), cwd, deadline),
-        QUALIFICATION,
-    )
-    warnings.append(WARNING)
+    help_call = connectors.probe((program, "exec", "--help"), cwd, deadline)
+    connectors.qualified_restrictions(help_call, QUALIFICATION)
+    if work:
+        connectors.qualified_restrictions(
+            help_call,
+            connectors.Qualification(
+                cli_identity=QUALIFICATION.cli_identity,
+                versions=QUALIFICATION.versions,
+                os_family=QUALIFICATION.os_family,
+                os_major_versions=QUALIFICATION.os_major_versions,
+                architectures=QUALIFICATION.architectures,
+                restrictions=WORK_RESTRICTIONS,
+            ),
+        )
+        warnings.append(WORK_WARNING)
+    else:
+        warnings.append(WARNING)
     warnings.append(
         "MiniMax has no state-free noninteractive authentication check: "
         "provider list can initialize its runtime and refresh or invalidate "
@@ -145,8 +198,12 @@ def _prerequisites(
     )
 
 
-def check(deadline: Deadline, cwd: str) -> connectors.CheckResult:
-    program, version, described, account, warnings = _prerequisites(deadline, cwd)
+def check(
+    deadline: Deadline, cwd: str, mode: str = "review"
+) -> connectors.CheckResult:
+    program, version, described, account, warnings = _prerequisites(
+        deadline, cwd, work=(mode == "work")
+    )
     return connectors.readiness(
         HARNESS_ID,
         program,
@@ -202,6 +259,76 @@ def build_command(
             "--output-format",
             "json" if required_model is not None else "text",
         ),
+        cwd=cwd,
+        env=connectors.environment(),
+        warnings=warnings,
+        response_parser=(
+            (lambda output: parse_response(output, required_model))
+            if required_model is not None
+            else None
+        ),
+    )
+
+
+def build_work_command(
+    deadline: Deadline,
+    cwd: str,
+    access_paths: Sequence[str] = (),
+    attachments: Sequence[str] = (),
+    max_steps: Optional[int] = None,
+    required_model: Optional[str] = None,
+) -> connectors.PeerCommand:
+    """The ordinary `mcode exec` work invocation, review-only bounds removed.
+
+    The workspace is the session's working directory, named by `--cwd` as the
+    program itself expects. The permission policy is `smart`, which is the
+    program's own default for a headless run; `ask` cannot run headless and
+    `full` and `off` are approval bypasses, so neither is ever selected. The
+    review call's one-assistant-step bound is not imposed: `--max-steps` is
+    passed only when the caller names a bound, and otherwise MiniMax's own
+    default governs the run inside Bridge's deadline. Each attachment becomes
+    one `--file`, which mcode hands to the model as image content. Declared
+    access directories are recorded in the session and stay reachable as
+    ordinary same-user paths; mcode has no per-call switch that widens its
+    workspace.
+    """
+    validate_run_options(max_steps, required_model)
+    program, _version, _described, _account, warnings = _prerequisites(
+        deadline, cwd, work=True
+    )
+    native_timeout = (
+        (
+            "--timeout",
+            "{0}ms".format(
+                max(1, int(math.ceil(deadline.seconds * 1000.0)))
+            ),
+        )
+        if deadline.seconds
+        <= MAX_NATIVE_TIMEOUT_MILLISECONDS / 1000.0
+        else ()
+    )
+    argv = [
+        program,
+        "exec",
+        "--input",
+        "-",
+        "--input-format",
+        "text",
+        "--cwd",
+        cwd,
+        "--permission",
+        "smart",
+    ]
+    argv.extend(native_timeout)
+    for attachment in attachments:
+        argv.extend(("--file", attachment))
+    if max_steps is not None:
+        argv.extend(("--max-steps", str(max_steps)))
+    argv.extend(
+        ("--output-format", "json" if required_model is not None else "text")
+    )
+    return connectors.PeerCommand(
+        argv=tuple(argv),
         cwd=cwd,
         env=connectors.environment(),
         warnings=warnings,

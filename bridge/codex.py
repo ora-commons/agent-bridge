@@ -1,15 +1,17 @@
-"""Calling Codex with its strongest practical read-only posture.
+"""Calling Codex with its strongest practical read-only posture, and its ordinary work posture.
 
 Codex is OpenAI's own command-line program for its coding agent. This module is
 the whole of what Agent Bridge knows about it: which program to start, which
 switches must be on it, and how to tell - without spending a model turn -
 whether starting it would work at all.
 
-There are two operations here and nothing else. `check` answers whether Codex
+There are three operations here and nothing else. `check` answers whether Codex
 could be used right now. `build_command` composes the one fixed argument vector
-a turn runs. Both do the same inexpensive prerequisites first, because a turn
-that skipped them would find out about a missing sign-in or a renamed switch in
-the middle of real work, with the peer already running.
+a review turn runs. `build_work_command` composes the ordinary configured
+`codex exec` a work turn runs. All of them do the same inexpensive
+prerequisites first (the work ones adding the work vector's own switches),
+because a turn that skipped them would find out about a missing sign-in or a
+renamed switch in the middle of real work, with the peer already running.
 
 **How the answer comes back.** `codex exec` puts its banner, the prompt it was
 handed, its warnings and its errors on the error stream, and puts only the final
@@ -58,7 +60,7 @@ SPDX-License-Identifier: CC0-1.0
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from . import connectors
 from .errors import BridgeError, Failure
@@ -104,20 +106,57 @@ WARNING = (
     "the read-only shell sandbox."
 )
 
+#: What this connector offers beyond its restricted review call. The work
+#: route is the ordinary configured `codex exec` under Codex's own
+#: workspace-write sandbox; the image route is Codex's native `-i/--image`
+#: attachment. Details name the route and where its live evidence stands.
+CAPABILITIES = connectors.Capabilities(
+    work="supported",
+    work_detail=(
+        "work uses the ordinary configured codex exec (the user's own model, "
+        "effort, and configuration) under Codex's enforced workspace-write "
+        "sandbox, with --add-dir for declared access directories"
+    ),
+    image="supported",
+    image_detail=(
+        "images travel as native codex exec -i/--image attachments"
+    ),
+)
+
+#: The switches beyond the review set that a work turn relies on, verified
+#: against the installed program's own help before any request is published.
+WORK_RESTRICTIONS = (
+    "--add-dir",
+    "--image",
+)
+
+WORK_WARNING = (
+    "Codex work runs with the user's ordinary configuration: model, effort, "
+    "hooks, MCP servers, plugins, and network settings the user or surviving "
+    "policy layers configure all apply, and none of the review call's "
+    "feature disables are inherited. Codex's workspace-write sandbox confines "
+    "writes to the working directory and any declared --add-dir directory; "
+    "codex exec cannot ask for an interactive approval, so a command the "
+    "sandbox refuses fails rather than prompts. External effects that "
+    "configuration makes available (web search, notify, network, telemetry) "
+    "remain possible and are the caller's responsibility to authorize."
+)
+
 
 def _prerequisites(
-    deadline: Deadline, cwd: str
+    deadline: Deadline, cwd: str, work: bool = False
 ) -> Tuple[str, str, str, Tuple[str, ...]]:
     """Everything that has to be true before starting Codex is worth doing.
 
     Five questions in order, each one cheap and none of them a model turn: is
     the program here, is its version one this connector was tested against, is
     this computer one it was tested on, is somebody signed in, and does the
-    installed version still have every switch the turn relies on. Any of them
+    installed version still have every switch the turn relies on - the review
+    set, plus the work set when a work turn is being composed. Any of them
     failing raises, so nothing further happens.
 
-    Returns the three facts a readiness report needs and a turn uses: where the
-    program is, which version answered, and how this computer describes itself.
+    Returns the three facts a readiness report needs and a turn uses: where
+    the program is, which version answered, and how this computer describes itself.
     """
     warnings = []  # type: List[str]
     program = connectors.executable(QUALIFICATION.cli_identity)
@@ -137,23 +176,40 @@ def _prerequisites(
             ),
         )
 
-    connectors.qualified_restrictions(
-        connectors.probe((program, "exec", "--help"), cwd, deadline),
-        QUALIFICATION,
-    )
-    warnings.append(WARNING)
+    help_call = connectors.probe((program, "exec", "--help"), cwd, deadline)
+    connectors.qualified_restrictions(help_call, QUALIFICATION)
+    if work:
+        connectors.qualified_restrictions(
+            help_call,
+            connectors.Qualification(
+                cli_identity=QUALIFICATION.cli_identity,
+                versions=QUALIFICATION.versions,
+                os_family=QUALIFICATION.os_family,
+                os_major_versions=QUALIFICATION.os_major_versions,
+                architectures=QUALIFICATION.architectures,
+                restrictions=WORK_RESTRICTIONS,
+            ),
+        )
+        warnings.append(WORK_WARNING)
+    else:
+        warnings.append(WARNING)
     return program, version, described, tuple(warnings)
 
 
-def check(deadline: Deadline, cwd: str) -> connectors.CheckResult:
+def check(
+    deadline: Deadline, cwd: str, mode: str = "review"
+) -> connectors.CheckResult:
     """Report whether Codex could be used right now, spending no model turn.
 
     `cwd` is a neutral directory made for this command, so the questions below
     are asked somewhere with nothing in it. No real project is touched, nothing
     is installed, nobody is logged in, no model or provider is chosen, and
-    nothing is written down for next time.
+    nothing is written down for next time. A work-mode check also proves the
+    work vector's own switches exist on the installed version.
     """
-    program, version, described, warnings = _prerequisites(deadline, cwd)
+    program, version, described, warnings = _prerequisites(
+        deadline, cwd, work=(mode == "work")
+    )
     return connectors.readiness(
         HARNESS_ID, program, version, described, "signed in", warnings
     )
@@ -201,6 +257,51 @@ def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
             cwd,
             "-",
         ),
+        cwd=cwd,
+        env=connectors.environment(),
+        warnings=warnings,
+    )
+
+
+def build_work_command(
+    deadline: Deadline,
+    cwd: str,
+    access_paths: Sequence[str] = (),
+    attachments: Sequence[str] = (),
+    max_steps: Optional[int] = None,
+    required_model: Optional[str] = None,
+) -> connectors.PeerCommand:
+    """The ordinary configured `codex exec`, under Codex's work sandbox.
+
+    Everything the review vector passes to keep the target read-only is left
+    out here: no `--ignore-user-config`, so the user's own model, effort, and
+    configuration apply exactly as an interactive Codex session would read
+    them, and none of the review feature disables are inherited. What is kept
+    is Codex's own enforced sandbox, in its workspace-write form, so writes
+    stay inside the working directory and the declared access directories;
+    `--add-dir` is how an access directory becomes writable, and `-i` is how
+    an attached image reaches the model as real input. Headless exec cannot
+    ask for an approval, so anything the sandbox refuses simply fails.
+    """
+    program, _version, _described, warnings = _prerequisites(
+        deadline, cwd, work=True
+    )
+    argv = [
+        program,
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "workspace-write",
+        "--cd",
+        cwd,
+    ]
+    for path in access_paths:
+        argv.extend(("--add-dir", path))
+    for attachment in attachments:
+        argv.extend(("--image", attachment))
+    argv.append("-")
+    return connectors.PeerCommand(
+        argv=tuple(argv),
         cwd=cwd,
         env=connectors.environment(),
         warnings=warnings,

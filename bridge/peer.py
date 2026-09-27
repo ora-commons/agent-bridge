@@ -85,7 +85,7 @@ import os
 import signal
 import subprocess
 import time
-from typing import Iterable, Iterator, NamedTuple, Optional, Sequence, Tuple
+from typing import Callable, Iterable, Iterator, NamedTuple, Optional, Sequence, Tuple
 
 from .errors import BridgeError, Failure
 
@@ -103,6 +103,12 @@ ESCALATION_GRACE_SECONDS = 5.0
 #: Interval between the short looks that ask whether the group has emptied.
 POLL_SECONDS = 0.02
 
+#: How often a bounded call reports that it is still waiting, in seconds. The
+#: report is a check-in, not progress: it says the caller's own deadline is
+#: still running and whether the child process is still alive, and nothing
+#: about the model. A turn that wants no reports leaves the hook unset.
+HEARTBEAT_SECONDS = 30.0
+
 
 class Deadline(object):
     """One deadline for a whole turn, made once and passed down.
@@ -110,15 +116,28 @@ class Deadline(object):
     Created at the start of a `run` and handed to every bounded step, so
     prechecks, the peer call and reading the answer all draw on the same budget
     rather than each getting a fresh one.
+
+    `heartbeat` is an optional no-result callback the bounded wait invokes
+    while a program is still running, roughly once per `HEARTBEAT_SECONDS`.
+    It receives the seconds elapsed since this deadline was made and whether
+    the child process is still running. Because every bounded step already
+    holds this one object, the callback reaches prerequisite probes and the
+    peer call alike without either gaining a parameter. It is unset for every
+    command that has not asked for check-ins.
     """
 
     def __init__(self, seconds: float) -> None:
         self.seconds = float(seconds)
         self._started = time.monotonic()
+        self.heartbeat = None  # type: Optional[Callable[[float, bool], None]]
 
     def remaining(self) -> float:
         """Seconds left; zero or less once the deadline has passed."""
         return self.seconds - (time.monotonic() - self._started)
+
+    def elapsed(self) -> float:
+        """Seconds spent since this deadline was made."""
+        return time.monotonic() - self._started
 
     def check(self, detail: Optional[str] = None) -> None:
         """Stop now if the deadline has already passed."""
@@ -479,12 +498,39 @@ def run_bounded(
                     raise BridgeError(spawn_failure, detail=str(exc))
                 pgid = _own_group(process)
                 with watch.allowing():
-                    try:
-                        stdout, stderr = process.communicate(
-                            input=payload, timeout=remaining
-                        )
-                    except subprocess.TimeoutExpired:
-                        timed_out = True
+                    # The wait is one deadline-watched loop rather than one
+                    # blocking call, for one reason only: so that a caller who
+                    # asked to be checked in with can be, while the child runs,
+                    # without a second thread or a second clock. The deadline
+                    # itself is the only bound; a check-in says nothing about
+                    # progress. Retrying `communicate` after a timeout loses no
+                    # output, and the body is supplied on the first pass only.
+                    remaining = deadline.remaining()
+                    supplied_body = True
+                    while True:
+                        if deadline.heartbeat is None:
+                            wait = remaining
+                        else:
+                            wait = min(remaining, HEARTBEAT_SECONDS)
+                        try:
+                            if supplied_body:
+                                stdout, stderr = process.communicate(
+                                    input=payload, timeout=wait
+                                )
+                            else:
+                                stdout, stderr = process.communicate(timeout=wait)
+                            break
+                        except subprocess.TimeoutExpired:
+                            supplied_body = False
+                            remaining = deadline.remaining()
+                            if remaining <= 0.0:
+                                timed_out = True
+                                break
+                            if deadline.heartbeat is not None:
+                                deadline.heartbeat(
+                                    deadline.elapsed(),
+                                    process.poll() is None,
+                                )
             finally:
                 if process is not None:
                     try:

@@ -133,10 +133,39 @@ class PeerCommand(NamedTuple):
 
 
 class CheckResult(NamedTuple):
-    """One successful readiness sentence and its informational warnings."""
+    """One successful readiness sentence, its facts, and its warnings.
+
+    `message` and `warnings` are the whole of the flag-free prose interface.
+    The remaining fields are the same readiness facts that sentence was built
+    from, so a caller that asked for one JSON result reads structured truth
+    rather than a sentence parsed back: where the program is, which version
+    answered, how this computer describes itself, and whether live
+    authentication was actually established.
+    """
 
     message: str
     warnings: Tuple[str, ...] = ()
+    executable: Optional[str] = None
+    version: Optional[str] = None
+    platform: Optional[str] = None
+    authentication_confirmed: bool = True
+
+
+class Capabilities(NamedTuple):
+    """What one connector offers beyond its restricted review call.
+
+    `work` and `image` are one of `supported`, `unsupported`, or `unknown`,
+    and each carries the sentence that makes the label truthful: the route a
+    supported claim names, or the genuine vendor limitation and the terminal
+    route an unsupported one leaves the caller with. A supported label states
+    transport support - the invocation exists and its switches are present -
+    and says separately whether a live model call has verified acceptance.
+    """
+
+    work: str
+    work_detail: str
+    image: str
+    image_detail: str
 
 
 #: The most a body may be when it travels on the command line, in encoded
@@ -388,6 +417,10 @@ def readiness(
             )
         ),
         warnings=tuple(warnings),
+        executable=program,
+        version=version,
+        platform=described_platform,
+        authentication_confirmed=authentication_confirmed,
     )
 
 

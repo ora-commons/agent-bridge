@@ -34,6 +34,18 @@ The exercised platform is macOS 26 on Apple silicon (arm64):
 | MiniMax Code | 0.2.7 |
 | Qwen Code | 0.23.0 |
 
+The opt-in working mode added on September 27, 2026 gives an application a
+way to send ordinary project work — not just restricted review calls — to a
+selected tool, with explicit image attachments, machine-readable readiness,
+and lifecycle events. It was implemented and source-verified against the
+then-installed Codex 0.155.1, Claude Code 2.1.278, ZCode 0.16.9, Hermes
+0.21.3, MiniMax Code 0.2.7, and Qwen Code 0.23.0, and live-qualified for the
+four targets that have an ordinary-permission work route: Codex, Claude Code,
+ZCode, and MiniMax Code. Hermes Agent and Qwen Code report work and images
+unsupported, with the real vendor limitation and the terminal route in the
+message; see the interface's work-route table. All flag-free review behavior
+is unchanged.
+
 No other platform qualification is claimed. There is no support, maintenance,
 or future compatibility promise. Qualification describes the source and CLI
 combination; it does not install or update anything on a user's machine.
@@ -138,6 +150,42 @@ This session is for trying the courier interface.
 MARKDOWN
 ```
 
+## The optional working mode
+
+Everything above is the review courier. An application that wants ordinary
+project work done creates the session with an explicit mode instead:
+
+```sh
+python3 -m bridge record \
+  --session "$HOME/.agent-bridge/sessions/work-session" \
+  --kind session-create --initiator my-app --peer codex --mode work \
+  --project /absolute/code/directory \
+  --access-path /absolute/document/directory <<'MARKDOWN'
+A work session for one selected tool.
+MARKDOWN
+```
+
+`--mode work` writes a Format 3 session; omitting `--mode` keeps the original
+Format 2 session and its restricted review behavior byte for byte. The
+working directory and access directories are immutable from creation; a work
+session may omit `--project` while a project has no code yet. A work call
+uses the tool's ordinary capabilities under its own normal permissions —
+Bridge selects no approval bypass — and each call still starts a fresh tool
+context, so the caller includes any needed continuity in the body.
+
+A work `run` may add `--attachment /absolute/image.png` (repeatable) where
+the target has a qualified image route, and `--note-ref` and `--purpose` to
+store two inert pairing labels in the request header. With
+`--events-jsonl`, standard output becomes one JSON object per line —
+`started`, periodic `heartbeat` check-ins, and one final `finished` event
+carrying the response path or the plain failure — while standard error stays
+diagnostics. `check` accepts `--mode review|work` and `--json` for one
+machine-readable readiness result. Codex, Claude Code, ZCode, and MiniMax
+Code have qualified work routes; Hermes Agent and Qwen Code answer work
+unsupported with the real reason and the terminal route. The complete
+contract, including every field and the per-target work and image table, is
+in [INTERFACE.md](INTERFACE.md).
+
 ## Output, failures, and waiting
 
 Keep the two output streams separate; a warning is not the answer path:
@@ -145,7 +193,10 @@ Keep the two output streams separate; a warning is not the answer path:
 | Command result | Standard output | Standard error | Exit status |
 |---|---|---|---|
 | `check` success | Readiness sentence and any `Warning:` lines | Empty | 0 |
+| `check --json` success | One JSON readiness object | Empty | 0 |
+| `check --json` failure | One JSON readiness object with `ready: false`, a `reason`, and a `next_action` | Empty | Nonzero |
 | `run` success | Response-file path only | Any `Warning:` lines, before request publication | 0 |
+| `run --events-jsonl` success | One JSON event per line; the final `finished` event carries the response path | Any `Warning:` lines | 0 |
 | `record` success | Written file's canonical path | Empty | 0 |
 | Any command failure | No success path | Reason and next action; any earlier run warnings remain | Nonzero |
 
@@ -260,13 +311,20 @@ files that account can read. A project target may load `AGENTS.md`, `CLAUDE.md`,
 or equivalent instructions. Vendor CLIs may keep plaintext transcripts; Bridge
 neither suppresses repository instructions nor deletes or hides those logs.
 
-Every connector uses the strongest practical vendor safeguards and warns about
-remaining configuration, tool, and external-effect limits. Warnings do not
+Every connector uses the strongest practical vendor safeguards for review
+calls and warns about remaining configuration, tool, and external-effect
+limits; a work call uses the tool's ordinary capabilities under its own
+normal permissions instead, keeps every warning that still applies, and adds
+the ones that matter to work. Bridge never selects an approval bypass to
+make a headless call succeed, and where a tool cannot do non-interactive
+work under ordinary permissions, Bridge reports work unsupported with the
+real diagnostic rather than quietly weakening anything. Warnings do not
 block a usable call, require approval, or store consent. Version or platform
 drift may proceed with a warning when required switches and transport still
 work. Complete confinement is not claimed: the model-provider connection and
 same-user reads remain outside it. The [interface](INTERFACE.md) details the
-individual connector limits, including surviving managed policy.
+individual connector limits, including surviving managed policy, and the
+per-target work and image routes.
 
 ZCode and Hermes receive the entire body as one bound command-line option,
 visible to other same-user processes or potentially to system and vendor logs.
@@ -310,8 +368,10 @@ surface warnings and failures, send a body, read an answer, and record a note.
 They are not separate runtimes and never call each other. Target-only harnesses
 need no Bridge skill. These files neither install themselves nor update installed copies.
 
-[INTERFACE.md](INTERFACE.md) defines the complete Format 2 command, record,
-warning, qualification, failure, and cleanup contract and release criteria.
+[INTERFACE.md](INTERFACE.md) defines the complete Format 2 and Format 3
+command, record, readiness-JSON, lifecycle-event, warning, qualification,
+failure, and cleanup contract and release criteria, including the readable
+Format 3 record surface and the per-target work and image routes.
 Application workflows, including Programming Loop, stay with the caller.
 
 ## License

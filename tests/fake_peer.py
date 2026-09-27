@@ -43,6 +43,10 @@ import sys
 import time
 
 #: Every supported mode, in the order the docstring above describes them.
+#: `delay-echo` exists for the lifecycle check-ins: it sleeps for a named
+#: number of seconds and then answers like `plain`, so a caller watching a
+#: bounded wait can observe heartbeats arriving while the child runs and one
+#: final result after it.
 MODES = (
     "plain",
     "last-argument",
@@ -50,6 +54,7 @@ MODES = (
     "whitespace",
     "fail",
     "hang",
+    "delay-echo",
     "spawn-child-then-hang",
     "write-pids-then-hang",
     "detach-child-then-hang",
@@ -177,6 +182,18 @@ def _run(mode: str, extra: list) -> int:
                 sys.stderr.write("fake peer: seconds must be a number\n")
                 return 2
         _sleep_bounded(seconds)
+        return 0
+
+    if mode == "delay-echo":
+        seconds = 0.0
+        if extra:
+            try:
+                seconds = float(extra[0])
+            except ValueError:
+                sys.stderr.write("fake peer: seconds must be a number\n")
+                return 2
+        _sleep_bounded(seconds)
+        _emit(echoed)
         return 0
 
     if mode == "spawn-child-then-hang":
