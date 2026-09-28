@@ -39,7 +39,12 @@ careful. A shell may still exist inside the turn; what it cannot do is write.
 It is passed by the review vector only: a work turn passes no sandbox switch at
 all, because the sandbox the user configured is part of the ordinary posture a
 work call exists to preserve, and a switch of Bridge's choosing - widening or
-narrowing - would silently replace it. `--skip-git-repo-check` is there because
+narrowing - would silently replace it. What Bridge knows about that posture it
+reads from the top of the user's config alone, so it is named as the apparent
+posture in a warning and never treated as the effective policy: codex resolves
+and enforces the actual posture itself at run time, and a work call that
+posture cannot serve fails inside codex with codex's own error.
+`--skip-git-repo-check` is there because
 the neutral directory a turn without a project runs in is not a Git repository,
 and Codex otherwise refuses to start outside one. `--cd` names the working
 root, and it is given the very directory the process is started in, so the two
@@ -113,21 +118,27 @@ WARNING = (
 )
 
 #: What this connector offers beyond its restricted review call. The work
-#: route is the ordinary configured `codex exec` with no sandbox switch: the
-#: effective sandbox is whatever codex itself resolves from the user's
-#: configuration or its own default, and an effective read-only posture - the
-#: out-of-box default - is refused before publication with the terminal route.
-#: The image route is Codex's native `-i/--image` attachment.
+#: route is the ordinary configured `codex exec` with no sandbox switch: what
+#: codex itself resolves from the user's configuration and enforces at run
+#: time is the actual posture, and this connector's own reading of the top of
+#: the user config is reported only as the apparent posture in a warning. The
+#: image route is Codex's native `-i/--image` attachment.
 CAPABILITIES = connectors.Capabilities(
     work="supported",
     work_detail=(
         "work uses the ordinary configured codex exec (the user's own model, "
         "effort, and configuration) with no sandbox switch of Bridge's "
-        "choosing: the effective sandbox is the one codex resolves from "
-        "sandbox_mode in $CODEX_HOME/config.toml or its own default, and a "
-        "work call under an effective read-only posture is refused before "
-        "publication with the limitation and the terminal route; --add-dir "
-        "adds writable roots under a writable posture"
+        "choosing: codex itself resolves and enforces the effective sandbox "
+        "at run time. Bridge reads the apparent posture from sandbox_mode at "
+        "the top of $CODEX_HOME/config.toml (codex's own documented default "
+        "for exec, read-only, when nothing is set there) and reports it in a "
+        "warning as apparent, not effective - a trusted project's "
+        ".codex/config.toml, managed_config.toml, requirements.toml, cloud "
+        "or MDM policy can change what codex enforces - and never refuses on "
+        "that partial reading; a genuinely read-only effective posture fails "
+        "inside codex with codex's own error, which Bridge surfaces with its "
+        "reason and next action; --add-dir adds writable roots under a "
+        "writable posture"
     ),
     image="supported",
     image_detail=(
@@ -142,15 +153,15 @@ WORK_RESTRICTIONS = (
     "--image",
 )
 
-#: The sandbox postures `codex exec` accepts, and the posture it runs in when
-#: nothing configures a wider one. The default is the vendor's own documented
-#: sentence for non-interactive mode: "By default, `codex exec` runs in a
-#: read-only sandbox."
+#: The sandbox postures `codex exec` accepts, and the posture its own
+#: documented default runs in when nothing configures another. The default is
+#: the vendor's own sentence for non-interactive mode: "By default, `codex
+#: exec` runs in a read-only sandbox."
 SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 DEFAULT_SANDBOX = "read-only"
 DEFAULT_SANDBOX_ORIGIN = (
-    "codex's own default: codex exec runs read-only when nothing configures "
-    "a wider sandbox"
+    "nothing at the top of the user config names a sandbox_mode; codex's own "
+    "documented default for exec is read-only"
 )
 
 #: One top-level `sandbox_mode = "..."` line in codex's config.toml. Matched
@@ -161,29 +172,38 @@ _SANDBOX_LINE = re.compile(
 )
 
 
-def _effective_sandbox() -> Tuple[str, str]:
-    """The sandbox posture codex itself would run a work turn under.
+def _apparent_sandbox() -> Tuple[str, str]:
+    """The posture the top of the user config indicates - apparent, not effective.
 
-    Codex resolves its sandbox from a `--sandbox` switch first (a work vector
-    passes none), then `sandbox_mode` at the top of `$CODEX_HOME/config.toml`
-    (the same file `--ignore-user-config` names, whose default home is
-    `~/.codex`), then its own built-in default, which is read-only for exec.
-    That order and that default were established on the installed program:
-    `codex debug prompt-input` renders the effective policy through codex's
-    own configuration pipeline and reported read-only under an empty home,
-    exactly the configured value under each of the three settings, and the
-    vendor's non-interactive documentation states the default in the same
-    words. Only the one scalar is read here, and anything that cannot be
-    resolved - an unreadable file, an unrecognized value - is returned
-    unresolved rather than guessed at, because a wrong guess is how a posture
-    comes to be silently replaced.
+    A work vector passes no `--sandbox` switch, no `-c` override, and no
+    `--profile`, so what codex itself resolves starts from `sandbox_mode` at
+    the top of `$CODEX_HOME/config.toml` (the same file
+    `--ignore-user-config` names, whose default home is `~/.codex`) and falls
+    back to its own built-in default, read-only for exec. Only that one
+    scalar is read here, and anything that cannot be resolved - an unreadable
+    file, an unrecognized value - is returned unresolved rather than guessed
+    at, because a wrong guess is how a posture comes to be silently replaced.
 
-    Returns the posture (empty when unresolved) and where it came from, in
-    words, for the warning that names it. What this cannot see - profiles,
-    a trusted-project `.codex/config.toml`, `managed_config.toml`,
-    `requirements.toml`, cloud or MDM policy - can change what codex actually
-    enforces, and codex enforces its own resolution at run time whatever this
-    returns; the work warning says so.
+    The result is evidence for a warning and never a basis for refusal,
+    because the reading is partial where codex's resolution is not. Verified
+    on the installed program (0.155.1): a work route's profiles apply only
+    through `--profile`/`-p`, which this vector never passes, and a legacy
+    top-level `profile = "..."` makes codex itself refuse to run; but a
+    project the user config marks trusted can carry its own
+    `.codex/config.toml` that changes the posture codex enforces (observed
+    flipping an empty top level from read-only to workspace-write through
+    that layer alone), and `managed_config.toml`, `requirements.toml`,
+    cloud or MDM policy sit outside anything Bridge reads. No
+    side-effect-free authoritative source for the effective policy exists
+    either: `codex doctor --json` reports no effective-posture field and
+    probes the network, and `codex debug prompt-input` renders codex's own
+    resolution but writes state into `CODEX_HOME` (`installation_id`,
+    `shell_snapshots`, skills), so neither may run as a pre-flight against
+    the user's real home. Codex therefore resolves and enforces the actual
+    posture itself at run time, whatever this returns.
+
+    Returns the apparent posture (empty when unresolved) and where it came
+    from, in words, for the warning that names it.
     """
     home = os.environ.get("CODEX_HOME") or os.path.expanduser(
         os.path.join("~", ".codex")
@@ -206,7 +226,7 @@ def _effective_sandbox() -> Tuple[str, str]:
         if matched is not None:
             value = matched.group(1)
             if value in SANDBOX_MODES:
-                return value, "sandbox_mode set in {0}".format(path)
+                return value, "sandbox_mode set at the top of {0}".format(path)
             return "", (
                 "{0} sets a sandbox_mode this connector does not recognize "
                 "({1!r})".format(path, value)
@@ -233,38 +253,42 @@ def _sandbox_limits(posture: str) -> str:
     return (
         "codex exec cannot write the files authorized work needs under a "
         "read-only sandbox and has no interactive approver to escalate to, "
-        "so a work call under it is refused before publication; run codex "
-        "in its own terminal for this work, where its approval flow can ask "
-        "you directly, or set sandbox_mode in codex's own configuration to "
-        "a posture that permits the authorized work."
+        "so if the posture codex actually enforces is read-only the call "
+        "fails inside codex with codex's own error, which Bridge surfaces "
+        "with its reason and next action; run codex in its own terminal for "
+        "this work, where its approval flow can ask you directly, or set "
+        "sandbox_mode in codex's own configuration to a posture that "
+        "permits the authorized work."
     )
 
 
 def _work_warning(posture: str, origin: str) -> str:
-    """The concrete boundary of one work call under the resolved posture."""
+    """The concrete boundary of one work call under the apparent posture."""
     if posture in SANDBOX_MODES:
         return (
             "Codex work runs with the user's ordinary configuration: model, "
             "effort, hooks, MCP servers, plugins, and network settings the "
             "user or surviving policy layers configure all apply, and none "
             "of the review call's feature disables are inherited. No "
-            "sandbox switch is passed: the effective sandbox is {0} ({1}). "
-            "{2} External effects that configuration makes available (web "
-            "search, notify, network, telemetry) remain possible and are "
-            "the caller's responsibility to authorize. Layers this warning "
-            "cannot read - a trusted-project .codex/config.toml, "
-            "managed_config.toml, requirements.toml, cloud or MDM policy - "
-            "can change the posture codex actually enforces.".format(
-                posture, origin, _sandbox_limits(posture)
-            )
+            "sandbox switch is passed: the top of the user config indicates "
+            "{0} ({1}), which is the apparent posture, not the effective "
+            "one - a trusted project's own .codex/config.toml, "
+            "managed_config.toml, requirements.toml, cloud or MDM policy, "
+            "or another codex mechanism this connector does not read can "
+            "change it, and codex itself resolves and enforces the actual "
+            "posture at run time. {2} External effects that configuration "
+            "makes available (web search, notify, network, telemetry) "
+            "remain possible and are the caller's responsibility to "
+            "authorize.".format(posture, origin, _sandbox_limits(posture))
         )
     return (
         "Codex work runs with the user's ordinary configuration and no "
-        "sandbox switch of Bridge's choosing, but the effective sandbox "
-        "posture could not be resolved: {0}. Codex's own enforced posture "
+        "sandbox switch of Bridge's choosing, but the apparent sandbox "
+        "posture could not be read: {0}. Codex's own enforced posture "
         "at run time governs; its built-in default is read-only, under "
         "which headless work cannot write, so the call may fail inside "
-        "codex if nothing wider is configured. External effects that "
+        "codex if nothing wider is configured, and that failure is "
+        "surfaced with codex's own error. External effects that "
         "configuration makes available (web search, notify, network, "
         "telemetry) remain possible and are the caller's responsibility "
         "to authorize.".format(origin)
@@ -318,7 +342,7 @@ def _prerequisites(
                 restrictions=WORK_RESTRICTIONS,
             ),
         )
-        posture, origin = _effective_sandbox()
+        posture, origin = _apparent_sandbox()
         warnings.append(_work_warning(posture, origin))
     else:
         warnings.append(WARNING)
@@ -415,29 +439,23 @@ def build_work_command(
     workspace-confining posture, and `-i` is how an attached image reaches
     the model as real input.
 
-    One posture cannot do this work headlessly, and it is refused here,
-    before anything is published: read-only, whether the user set it or
-    codex's out-of-box default applies it, because `codex exec` under it
-    cannot write the files authorized work needs and has no interactive
-    approver to escalate to. The refusal names the posture, its origin, and
-    the terminal route. An unresolvable configuration is not guessed at -
-    the call proceeds under codex's own enforcement with that stated in its
-    warning, since passing a switch to resolve the doubt is the replacement
-    this builder exists not to perform.
+    Nothing here refuses a configured work route. The posture this connector
+    can read - `sandbox_mode` at the top of the user config, or codex's own
+    documented default - is apparent, not effective: a trusted project's own
+    `.codex/config.toml`, managed, cloud or MDM policy, or another codex
+    mechanism can change what codex actually enforces, and no cheap,
+    side-effect-free, authoritative reading of the effective policy exists
+    in the installed program. So the builder proceeds with no posture flag
+    and lets codex's own configuration resolution govern, warning about the
+    apparent posture it read. A work call the effective posture cannot serve
+    - a genuinely read-only sandbox, which cannot write what authorized work
+    needs and has no interactive approver to escalate to - fails inside
+    codex with codex's own error, which the runner surfaces with its reason
+    and next action.
     """
     program, _version, _described, warnings = _prerequisites(
         deadline, cwd, work=True
     )
-    posture, origin = _effective_sandbox()
-    if posture == "read-only":
-        raise BridgeError(
-            Failure.WORK_POSTURE_UNAVAILABLE,
-            detail=(
-                "codex's effective sandbox posture is read-only ({0})".format(
-                    origin
-                )
-            ),
-        )
     argv = [
         program,
         "exec",
