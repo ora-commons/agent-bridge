@@ -490,15 +490,25 @@ def peer_to_initiator_text(
     initiator: str,
     body: str,
     answers: Optional[int] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> str:
     """A peer's final answer, copied through unchanged.
 
     A Format 3 response names the request sequence it answers, so a caller
-    reading the record can pair them without guessing.
+    reading the record can pair them without guessing. When the target's own
+    structured output reported which model and provider answered, those two
+    exact single-line strings ride along as `Model:` and `Provider:` header
+    lines - present only when the tool reported them, never as empty
+    placeholders - while the body below `## Body` stays byte-exact.
     """
     header_lines = ["From: {0}".format(peer), "To: {0}".format(initiator)]
     if answers is not None:
         header_lines.append("Answers: {0}".format(format_sequence(answers)))
+    if model is not None:
+        header_lines.append("Model: {0}".format(model))
+    if provider is not None:
+        header_lines.append("Provider: {0}".format(provider))
     return _compose(
         "# Message {0}".format(format_sequence(sequence)), header_lines, body
     )

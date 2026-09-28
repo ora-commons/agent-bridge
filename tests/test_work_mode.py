@@ -9,8 +9,10 @@ explicit creation, the immutable Format 3 fields and request/reply pairing,
 exact bodies and inert metadata, readiness certainty and honestly unsupported
 routes, heartbeat and final-event ordering, separate code and document
 directories, real image bytes reaching a tool, the ordinary-permission work
-vectors of the four connectors that have them, and a failed or stopped call
-retaining its records without inventing success.
+vectors of the four connectors that have them, a tool-reported model and
+provider identity surfacing in the finished event and the Format 3 response
+record while unreported identity leaves the fields absent, and a failed or
+stopped call retaining its records without inventing success.
 
 The work-mode readiness checks are qualified here against each connector's
 real source: a work check proves the work vector's own switches and never the
@@ -708,6 +710,202 @@ def result_path(session_dir, sequence):
     return session.message_path(
         session_dir, sequence, session.INITIATOR_TO_PEER_SUFFIX
     )
+
+
+class ReportedIdentityAttribution(unittest.TestCase):
+    """The identity a tool's own output reported survives the run.
+
+    MiniMax's JSON result mode - the one fixed output route today that
+    reports which provider and model answered - is driven through its real
+    parser, builder, and runner: the identity the parser validated must be
+    the identity that surfaces, in the finished event's optional fields and
+    in a Format 3 response record's `Model:`/`Provider:` header lines,
+    while the published body stays the final answer text alone. A response
+    no identity traveled with leaves both surfaces without the fields -
+    never empty strings - and a reported identity that does not match the
+    required model still fails the call before any response exists.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.mkdtemp(prefix="agent-bridge-work-attribution-")
+        self.session_dir = os.path.join(self.temp, "session")
+        record.record(
+            self.session_dir,
+            "session-create",
+            "A MiniMax work session.\n",
+            initiator="vibe-coder",
+            peer="minimax",
+            mode="work",
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    @staticmethod
+    def _result(provider_id="minimax", model_id="MiniMax-M2.5"):
+        """One MiniMax exec.result JSON, as the installed program prints it."""
+        return json.dumps(
+            {
+                "schemaVersion": 1,
+                "type": "exec.result",
+                "status": "succeeded",
+                "output": "The attributed answer.\n",
+                "model": {"providerId": provider_id, "modelId": model_id},
+            }
+        )
+
+    def _fake_mcode(self, result_json):
+        """A stand-in mcode that prints one fixed JSON result, args ignored."""
+        payload = os.path.join(self.temp, "exec-result.json")
+        with open(payload, "w", encoding="utf-8") as stream:
+            stream.write(result_json)
+        program = os.path.join(self.temp, "mcode")
+        with open(program, "w", encoding="utf-8") as stream:
+            stream.write('#!/bin/sh\ncat "{0}"\n'.format(payload))
+        os.chmod(program, 0o755)
+        return (
+            program,
+            "0.2.7",
+            "Darwin 26 arm64",
+            "no state-free noninteractive authentication-status command "
+            "is available",
+            (minimax.WORK_WARNING,),
+        )
+
+    def _read(self, path):
+        with open(path, encoding="utf-8") as stream:
+            return stream.read()
+
+    def test_a_reported_identity_surfaces_in_the_event_and_the_record(self):
+        parsed = minimax.parse_response(
+            self._result(), "minimax/MiniMax-M2.5"
+        )
+        self.assertEqual(parsed, "The attributed answer.\n")
+        self.assertEqual(parsed.provider, "minimax")
+        self.assertEqual(parsed.model, "MiniMax-M2.5")
+
+        events = []
+        with mock.patch.object(
+            minimax,
+            "_prerequisites",
+            return_value=self._fake_mcode(self._result()),
+        ):
+            result = runner.run_turn(
+                self.session_dir,
+                "Answer as yourself.\n",
+                30.0,
+                required_model="minimax/MiniMax-M2.5",
+                event_writer=events.append,
+            )
+        finished = json.loads(events[-1])
+        self.assertEqual(finished["outcome"], "success")
+        # The surfaced identity is the one the parser validated: the tool's
+        # own reported halves, exactly as they were printed.
+        self.assertEqual(finished["model"], "MiniMax-M2.5")
+        self.assertEqual(finished["provider"], "minimax")
+        self.assertEqual(
+            self._read(result.response_path),
+            "# Message 0002\nFrom: minimax\nTo: vibe-coder\nAnswers: 0001\n"
+            "Model: MiniMax-M2.5\nProvider: minimax\n\n## Body\n\n"
+            "The attributed answer.\n",
+        )
+
+    def test_unreported_identity_leaves_the_fields_absent_never_empty(self):
+        def plain_builder(response_parser):
+            def build(deadline, cwd, **kwargs):
+                return PeerCommand(
+                    argv=(sys.executable, FAKE_PEER, "plain"),
+                    cwd=cwd,
+                    env=tuple(os.environ.items()),
+                    response_parser=response_parser,
+                )
+
+            return build
+
+        routes = (
+            ("no structured output at all", None),
+            ("structured output reporting no identity", lambda output: output),
+        )
+        for name, parser in routes:
+            with self.subTest(route=name):
+                events = []
+                result = runner.run_turn(
+                    self.session_dir,
+                    "Plain answer.\n",
+                    30.0,
+                    build_work_command=plain_builder(parser),
+                    event_writer=events.append,
+                )
+                finished = json.loads(events[-1])
+                self.assertEqual(finished["outcome"], "success")
+                self.assertNotIn("model", finished)
+                self.assertNotIn("provider", finished)
+                header = self._read(result.response_path).partition(
+                    "\n## Body"
+                )[0]
+                self.assertNotIn("Model:", header)
+                self.assertNotIn("Provider:", header)
+
+    def test_a_mismatched_reported_identity_fails_before_any_response(self):
+        events = []
+        with mock.patch.object(
+            minimax,
+            "_prerequisites",
+            return_value=self._fake_mcode(
+                self._result(model_id="MiniMax-M1.5")
+            ),
+        ):
+            with self.assertRaises(BridgeError) as caught:
+                runner.run_turn(
+                    self.session_dir,
+                    "Answer as an older model.\n",
+                    30.0,
+                    required_model="minimax/MiniMax-M2.5",
+                    event_writer=events.append,
+                )
+        self.assertEqual(caught.exception.failure, Failure.PEER_FAILURE)
+        self.assertIn("did not exactly match", caught.exception.detail)
+        finished = json.loads(events[-1])
+        self.assertEqual(finished["outcome"], "failure")
+        self.assertNotIn("model", finished)
+        self.assertNotIn("provider", finished)
+        self.assertEqual(
+            os.listdir(session.messages_dir(self.session_dir)),
+            ["0001-initiator-to-peer.md"],
+        )
+
+    def test_a_format_two_record_never_grows_attribution_headers(self):
+        legacy = os.path.join(self.temp, "legacy")
+        record.record(
+            legacy,
+            "session-create",
+            "A legacy MiniMax session.\n",
+            initiator="gear-3",
+            peer="minimax",
+        )
+        events = []
+        with mock.patch.object(
+            minimax,
+            "_prerequisites",
+            return_value=self._fake_mcode(self._result()),
+        ):
+            result = runner.run_turn(
+                legacy,
+                "Legacy bounded call.\n",
+                30.0,
+                required_model="minimax/MiniMax-M2.5",
+                event_writer=events.append,
+            )
+        # The legacy record keeps its exact shape; the opt-in event stream,
+        # not the record contract, is where the identity also surfaces.
+        self.assertEqual(
+            self._read(result.response_path),
+            "# Message 0002\nFrom: minimax\nTo: gear-3\n\n## Body\n\n"
+            "The attributed answer.\n",
+        )
+        finished = json.loads(events[-1])
+        self.assertEqual(finished["model"], "MiniMax-M2.5")
+        self.assertEqual(finished["provider"], "minimax")
 
 
 class ReadinessAndSupport(unittest.TestCase):

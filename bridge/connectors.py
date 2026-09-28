@@ -26,7 +26,8 @@ reader can see the whole of it in one place.
 
 Finally it holds the two small fixed shapes the rest of the code passes around:
 what a connector claims to have been tested against, and what one bounded call
-to a peer program consists of.
+to a peer program consists of, beside the attributed final text a parser of a
+structured output format may return.
 
 SPDX-License-Identifier: CC0-1.0
 """
@@ -91,6 +92,44 @@ class Qualification(NamedTuple):
     restrictions: Tuple[str, ...]
 
 
+class AttributedText(str):
+    """A final response text carrying the identity the tool itself reported.
+
+    A parser that reads a structured output format may learn, from that
+    output alone, which provider and model actually answered the call. This
+    is that same final text - it is a `str`, compares equal to the plain
+    extracted text, and publishes as that text - with the two reported
+    halves attached, so an identity the tool reported, and the connector
+    validated, travels on to the response record and the finished event
+    instead of being discarded. A parser whose output format reports no
+    identity keeps returning the plain string, exactly as before.
+
+    Each attribute is the exact single-line string the tool's own output
+    named, or `None` when it named neither: a connector never infers,
+    defaults, or fills a half from its own vector or configuration, so an
+    absent half stays absent rather than becoming an empty placeholder. The
+    strings are attached only after the connector has validated them - the
+    way MiniMax's byte-exact `--require-model` comparison does - so a
+    header line they become is a line the tool really reported.
+    """
+
+    #: The provider the tool's output named as having answered, or None.
+    provider = None  # type: Optional[str]
+    #: The model the tool's output named as having answered, or None.
+    model = None  # type: Optional[str]
+
+    def __new__(
+        cls,
+        text: str,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> "AttributedText":
+        attributed = super().__new__(cls, text)
+        attributed.provider = provider
+        attributed.model = model
+        return attributed
+
+
 class PeerCommand(NamedTuple):
     """One bounded call to a peer harness's program.
 
@@ -118,9 +157,13 @@ class PeerCommand(NamedTuple):
     body holding a NUL byte, which no argument can carry. Under either
     transport prompt text never passes through a shell. `warnings` are the
     concrete limits a successful check and run must surface. `response_parser`
-    extracts final text when the fixed output is structured. `stdin_encoder`
-    wraps the unchanged body in a vendor input frame before publication when
-    the selected CLI requires one; it never changes the canonical request.
+    extracts final text when the fixed output is structured; when that same
+    output reports which provider and model answered, the parser returns the
+    text as `AttributedText` - the final text unchanged with the reported
+    identity attached - and the runner carries that identity to the extended
+    result surfaces. `stdin_encoder` wraps the unchanged body in a vendor
+    input frame before publication when the selected CLI requires one; it
+    never changes the canonical request.
     """
 
     argv: Tuple[str, ...]
