@@ -179,13 +179,14 @@ CREATION_DRIVER = (
 
 #: Stopped a second time, while the first stop's cleanup is under way. The
 #: second signal is delivered from in front of the cleanup step, so it lands
-#: inside it.
+#: inside it. The wrapper carries the cleanup's whole signature, job
+#: included, so the stand-in stays in the call path rather than beside it.
 SECOND_STOP_DRIVER = (
     _DRIVER_HEAD
     + "empty_group = peer._cleanup_group\n"
-    "def cleanup(process, pgid):\n"
+    "def cleanup(process, pgid, job=None):\n"
     "    os.kill(os.getpid(), signal.SIGTERM)\n"
-    "    return empty_group(process, pgid)\n"
+    "    return empty_group(process, pgid, job)\n"
     "peer._cleanup_group = cleanup\n"
     + _DRIVER_CALL
 )

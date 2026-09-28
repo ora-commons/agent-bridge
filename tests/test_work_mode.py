@@ -19,11 +19,13 @@ for a target with no work vector performs no switch qualification at all.
 
 Two platform twins are exercised here too, both simulated, because no Windows
 machine is part of this repository's qualification: the `msvcrt.locking` twin
-of the session lock, and the taskkill twin of process-group cleanup, each
-driven through its Windows branch with the platform's own primitive stood in
-for. Event lines and the terminal response-path line being flushed as they
-are written is checked as well, because a caller watching a pipe sees nothing
-until a flush.
+of the session lock, and the taskkill and kill-on-close job twins of
+process-group cleanup, each driven through its Windows branch with the
+platform's own primitive stood in for - including the parent-exits-first case
+where the tree walk has no root to walk from and the job is the only owner
+left standing. Event lines and the terminal response-path line being flushed
+as they are written is checked as well, because a caller watching a pipe sees
+nothing until a flush.
 
 The lifecycle fixtures are the repository's own fake peer; no real target is
 called here.
@@ -33,6 +35,7 @@ SPDX-License-Identifier: CC0-1.0
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import io
 import json
@@ -107,21 +110,25 @@ def _await_reported_pids(pid_path, timeout=10.0):
 #: its own so a check can signal the thing doing the waiting rather than the
 #: check itself. It patches the platform switch and stands in for taskkill
 #: with a function that force-terminates the same tree the real command's
-#: /T walk would reach, is stopped from outside while it waits, and exits 3
-#: when it leaves as the stop it was. Its arguments are the fake peer's mode
-#: and the file the fixture writes its process ids into.
+#: /T walk would reach, and for the kill-on-close job with a release that
+#: terminates the same members the kernel's close would, is stopped from
+#: outside while it waits, and exits 3 when it leaves as the stop it was.
+#: Its arguments are the fake peer's mode and the file the fixture writes its
+#: process ids into.
 WINDOWS_SIGNAL_DRIVER = (
     "import os, signal, sys\n"
     "sys.path.insert(0, sys.argv[1])\n"
     "from bridge import peer\n"
     "pid_file = sys.argv[4]\n"
-    "def taskkill(pgid):\n"
+    "def tree_pids(pgid):\n"
     "    pids = [pgid]\n"
     "    with open(pid_file, encoding='utf-8') as stream:\n"
     "        for line in stream:\n"
     "            parts = line.split()\n"
     "            if len(parts) == 2 and parts[0] == 'CHILD':\n"
     "                pids.append(int(parts[1]))\n"
+    "    return pids\n"
+    "def terminate(pids):\n"
     "    found = False\n"
     "    for pid in pids:\n"
     "        try:\n"
@@ -129,11 +136,19 @@ WINDOWS_SIGNAL_DRIVER = (
     "            found = True\n"
     "        except ProcessLookupError:\n"
     "            pass\n"
-    "    return not found\n"
+    "    return found\n"
+    "def taskkill(pgid):\n"
+    "    return not terminate(tree_pids(pgid))\n"
+    "def own_tree(process):\n"
+    "    return ('job', process.pid)\n"
+    "def release(job):\n"
+    "    terminate(tree_pids(job[1]))\n"
     "peer.WINDOWS = True\n"
     "peer.CLEANUP_GRACE_SECONDS = 0.2\n"
     "peer.ESCALATION_GRACE_SECONDS = 0.5\n"
     "peer._windows_taskkill = taskkill\n"
+    "peer._windows_own_tree = own_tree\n"
+    "peer._windows_release_job = release\n"
     "try:\n"
     "    peer.run_bounded(\n"
     "        argv=(sys.executable, sys.argv[2], sys.argv[3], sys.argv[4]),\n"
@@ -1684,15 +1699,18 @@ class WindowsLockingTwins(unittest.TestCase):
 
 
 class WindowsProcessCleanup(unittest.TestCase):
-    """The taskkill cleanup branch, simulated: the owned tree ends with the turn.
+    """The taskkill and job cleanup branch, simulated: the owned tree ends.
 
     No Windows machine is part of this repository's qualification, so the
     Windows branch of process cleanup is driven by patching the platform
     switch and standing in for `taskkill /T /F` with a function that
     force-terminates the same processes the real command's own tree walk
-    would reach. Everything else in each check is real: the spawn, the
-    deadline, the signal delivery, the reaping, and the processes that must
-    be gone afterwards. The Unix branch of the same cleanup is the
+    would reach, and for the kill-on-close job with a release that
+    terminates the same members the kernel's close would. Everything else in
+    each check is real: the spawn, the deadline, the signal delivery, the
+    reaping, and the processes that must be gone afterwards - including the
+    one case where the root exits before cleanup and the tree walk has
+    nothing to walk from. The Unix branch of the same cleanup is the
     compatibility selection's own orphan and stop checks.
     """
 
@@ -1701,6 +1719,15 @@ class WindowsProcessCleanup(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.temp, ignore_errors=True)
+
+    def _child_pids(self, pid_path):
+        """The descendant pids the fixture reported, read from its file."""
+        with open(pid_path, encoding="utf-8") as stream:
+            return [
+                int(number)
+                for kind, number in PID_LINE.findall(stream.read())
+                if kind == "CHILD"
+            ]
 
     def _tree_killer(self, pid_path):
         """A stand-in for `taskkill /T /F` on one root pid.
@@ -1712,11 +1739,7 @@ class WindowsProcessCleanup(unittest.TestCase):
         """
 
         def taskkill(pgid):
-            pids = [pgid]
-            with open(pid_path, encoding="utf-8") as stream:
-                for kind, number in PID_LINE.findall(stream.read()):
-                    if kind == "CHILD":
-                        pids.append(int(number))
+            pids = [pgid] + self._child_pids(pid_path)
             found = False
             for pid in pids:
                 try:
@@ -1728,14 +1751,70 @@ class WindowsProcessCleanup(unittest.TestCase):
 
         return taskkill
 
+    def _walk_from_root_killer(self, pid_path):
+        """A stand-in for `taskkill /T /F` faithful to where the walk starts.
+
+        The real command's `/T` walk begins at the root pid: a root that has
+        already exited turns the whole command into one not-found report that
+        names no descendant and empties nothing, and a live root names the
+        whole tree. The stand-in does exactly that and nothing more, which is
+        what makes it the right simulation for the parent-exits-first case:
+        it cannot reach an orphan even by accident.
+        """
+
+        def taskkill(pgid):
+            try:
+                os.kill(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                return True
+            for pid in self._child_pids(pid_path):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            return False
+
+        return taskkill
+
+    def _owned_job(self, pid_path, order=None):
+        """Stand-ins for the kill-on-close job's assignment and release.
+
+        The real release is the kernel's: closing the last handle to the job
+        terminates every member, root or descendant, alive at the close. The
+        stand-in terminates the same set the tree killer would, which is what
+        makes it faithful to the one case the correction is about - the root
+        already gone and a descendant still running.
+        """
+
+        def own_tree(process):
+            if order is not None:
+                order.append(("own", process.pid))
+            return ("job", process.pid)
+
+        def release(job):
+            if order is not None:
+                order.append(("release", job[1]))
+            for pid in [job[1]] + self._child_pids(pid_path):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+        return own_tree, release
+
     def test_a_windows_timeout_terminates_the_whole_owned_tree(self):
         pid_path = os.path.join(self.temp, "timeout-pids.txt")
+        own_tree, release = self._owned_job(pid_path)
         with mock.patch.object(peer, "WINDOWS", True), mock.patch.object(
             peer, "CLEANUP_GRACE_SECONDS", 0.2
         ), mock.patch.object(
             peer, "ESCALATION_GRACE_SECONDS", 0.5
         ), mock.patch.object(
             peer, "_windows_taskkill", side_effect=self._tree_killer(pid_path)
+        ), mock.patch.object(
+            peer, "_windows_own_tree", side_effect=own_tree
+        ), mock.patch.object(
+            peer, "_windows_release_job", side_effect=release
         ):
             with self.assertRaises(peer.PeerTimeout) as caught:
                 peer.run_bounded(
@@ -1795,6 +1874,160 @@ class WindowsProcessCleanup(unittest.TestCase):
             "the process the peer started is still there after the stop",
         )
 
+    def test_a_windows_root_that_exits_first_still_ends_its_descendants(self):
+        """The parent-exits-first case: the root is gone before cleanup, a
+        descendant is alive, and the corrected ownership still ends it.
+
+        A tree walk that starts at the root can confirm nothing once the root
+        has exited - `taskkill`'s not-found report names no descendant - so
+        the ownership is the kill-on-close job, whose release terminates
+        every member, root or no root. The two stand-ins are faithful to
+        exactly that split: this taskkill walks only from a live root and
+        kills nothing when the root is gone, so the release is the only
+        thing that can reach the orphan, and the run must finish clean.
+        """
+        pid_path = os.path.join(self.temp, "orphan-pids.txt")
+        order = []
+        own_tree, release = self._owned_job(pid_path, order)
+        walk = self._walk_from_root_killer(pid_path)
+
+        def taskkill(pgid):
+            order.append(("taskkill", pgid))
+            return walk(pgid)
+
+        with mock.patch.object(peer, "WINDOWS", True), mock.patch.object(
+            peer, "CLEANUP_GRACE_SECONDS", 0.2
+        ), mock.patch.object(
+            peer, "ESCALATION_GRACE_SECONDS", 0.5
+        ), mock.patch.object(
+            peer, "_windows_taskkill", side_effect=taskkill
+        ), mock.patch.object(
+            peer, "_windows_own_tree", side_effect=own_tree
+        ), mock.patch.object(
+            peer, "_windows_release_job", side_effect=release
+        ):
+            completed = peer.run_bounded(
+                argv=(
+                    sys.executable, FAKE_PEER,
+                    "write-pids-then-exit", pid_path,
+                ),
+                cwd=self.temp,
+                env=tuple(os.environ.items()),
+                stdin_text="Start something, leave it behind, and go.\n",
+                deadline=peer.Deadline(30.0),
+            )
+        pids = _await_reported_pids(pid_path)
+        self.assertEqual(completed.returncode, 0)
+        # The job was taken out at spawn and closed before any confirming
+        # walk, which is the order that makes a not-found report an honest
+        # emptiness answer for the descendants the walk never reached.
+        self.assertEqual(order[0], ("own", pids["PEER"]))
+        self.assertEqual(order[1], ("release", pids["PEER"]))
+        self.assertEqual(order[2][0], "taskkill")
+        self.assertTrue(
+            _wait_until_gone(pids["PEER"]),
+            "the peer is still there after the Windows cleanup",
+        )
+        self.assertTrue(
+            _wait_until_gone(pids["CHILD"]),
+            "the descendant that outlived its root is still there",
+        )
+
+    def test_a_windows_spawn_refused_ownership_ends_what_it_started(self):
+        """A platform that refuses the kill-on-close job does not get to run.
+
+        The refusal is the answer rather than a degraded run: what was just
+        started is terminated at once, while its root is alive and the tree
+        walk can still reach whatever it started, and no cleanup runs
+        afterwards because the responsibility has already been taken.
+        """
+        order = []
+
+        def refusing_own_tree(process):
+            order.append(("own", process.pid))
+            raise BridgeError(
+                Failure.CLEANUP_FAILURE,
+                detail="the platform refused the kill-on-close job",
+            )
+
+        def release(job):
+            order.append(("release", job))
+
+        def taskkill(pgid):
+            try:
+                os.kill(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                order.append(("taskkill-missing", pgid))
+                return True
+            order.append(("taskkill-terminated", pgid))
+            return False
+
+        with mock.patch.object(peer, "WINDOWS", True), mock.patch.object(
+            peer, "_windows_own_tree", side_effect=refusing_own_tree
+        ), mock.patch.object(
+            peer, "_windows_release_job", side_effect=release
+        ), mock.patch.object(
+            peer, "_windows_taskkill", side_effect=taskkill
+        ):
+            with self.assertRaises(BridgeError) as caught:
+                peer.run_bounded(
+                    argv=(sys.executable, FAKE_PEER, "hang"),
+                    cwd=self.temp,
+                    env=tuple(os.environ.items()),
+                    stdin_text="Start something and then stop answering.\n",
+                    deadline=peer.Deadline(30.0),
+                )
+        self.assertEqual(caught.exception.failure, Failure.CLEANUP_FAILURE)
+        self.assertIn(
+            "refused the kill-on-close job", caught.exception.detail
+        )
+        # The refused run ended the program it had started through the live
+        # root, in that order, and no job was ever released because none was
+        # taken.
+        root = order[0][1]
+        self.assertEqual(
+            order,
+            [("own", root), ("taskkill-terminated", root)],
+            "the started program must be terminated while its root is live",
+        )
+        self.assertTrue(
+            _wait_until_gone(root),
+            "the refused program is still running",
+        )
+
+    def test_the_kill_on_close_job_structure_matches_the_api_layout(self):
+        """The ctypes declaration is the layout `SetInformationJobObject`
+        expects, measured rather than trusted, carrying the one limit flag
+        and nothing else. The measurement runs on this platform because a
+        byte layout is a fact about the declaration, not the machine; the
+        only platform-dependent part is the pointer width, which the Windows
+        build shares with the one running here.
+        """
+        information = peer._windows_job_information()
+        self.assertEqual(
+            information.BasicLimitInformation.LimitFlags,
+            peer._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        )
+        counters = type(information.IoInfo)
+        self.assertEqual(
+            ctypes.sizeof(counters), 48, "IO_COUNTERS is six quadwords"
+        )
+        # JOBOBJECT_BASIC_LIMIT_INFORMATION: two quadwords, a dword, two
+        # pointer-sized fields, a dword, a pointer-sized affinity, and two
+        # dwords, with the platform's own alignment.
+        pointer = ctypes.sizeof(ctypes.c_void_p)
+        expected_basic = 64 if pointer == 8 else 48
+        self.assertEqual(
+            ctypes.sizeof(information.BasicLimitInformation), expected_basic
+        )
+        # The extended structure is the basic one, the counters exactly
+        # where the basic one ends, and four pointer-sized limits.
+        self.assertEqual(
+            ctypes.sizeof(information),
+            expected_basic + 48 + 4 * pointer,
+        )
+        self.assertEqual(type(information).IoInfo.offset, expected_basic)
+
     class _WindowsSignals(object):
         """A stand-in for the Windows signal module.
 
@@ -1817,11 +2050,11 @@ class WindowsProcessCleanup(unittest.TestCase):
         discovered only on a Windows machine nobody has.
 
         The escalation sentinel is re-resolved from the stand-in exactly as
-        the module resolves it at import, the escalation phase is reached by
-        making the polite one insufficient, and every platform primitive the
-        branch touches is stood in for, so the check is about the one thing
-        that broke: the resolved values, and a code path that never reaches
-        for an attribute the platform's own signal module does not define.
+        the module resolves it at import, the escalation phase - the job
+        handle's close - is reached with every platform primitive the branch
+        touches stood in for, so the check is about the one thing that
+        broke: the resolved values, and a code path that never reaches for
+        an attribute the platform's own signal module does not define.
         """
         windows = self._WindowsSignals()
         resolved = getattr(windows, "SIGKILL", None)
@@ -1831,11 +2064,16 @@ class WindowsProcessCleanup(unittest.TestCase):
             "module without SIGKILL",
         )
         process = mock.Mock(pid=4321)
+        job = ("job", 4321)
         kills = []
+        releases = []
         taskkills = []
 
         def fake_kill(pid, number):
             kills.append((pid, number))
+
+        def fake_release(handle):
+            releases.append(handle)
 
         def fake_taskkill(pgid):
             taskkills.append(pgid)
@@ -1852,22 +2090,65 @@ class WindowsProcessCleanup(unittest.TestCase):
         ), mock.patch.object(
             peer, "_windows_taskkill", side_effect=fake_taskkill
         ), mock.patch.object(
+            peer, "_windows_release_job", side_effect=fake_release
+        ), mock.patch.object(
             peer, "_reap", lambda waited, grace: None
         ), mock.patch.object(
-            peer, "_await_group_gone", side_effect=[False, True]
+            peer, "_await_group_gone", side_effect=[True]
         ):
             # Reaching the end at all is the first assertion: naming
             # signal.SIGKILL anywhere on this path raises AttributeError
             # against the stand-in, as it would against the real module.
-            peer._cleanup_group(process, 4321)
+            peer._cleanup_group(process, 4321, job)
 
-        # The polite phase was the console break alone and the escalation was
-        # taskkill alone: no signal Windows does not have was named, sent, or
-        # needed to empty the owned tree.
+        # The polite phase was the console break alone and the forced phase
+        # was the job handle's close: no signal Windows does not have was
+        # named, sent, or needed to empty the owned tree.
         self.assertEqual(
             kills, [(4321, windows.CTRL_BREAK_EVENT)]
         )
-        self.assertEqual(taskkills, [4321])
+        self.assertEqual(releases, [job])
+        self.assertEqual(taskkills, [])
+
+        # A tree that will not confirm emptiness fails visibly rather than
+        # pretending, still without naming any signal Windows lacks.
+        with mock.patch.object(peer, "WINDOWS", True), mock.patch.object(
+            peer, "signal", windows
+        ), mock.patch.object(
+            peer, "_SIGKILL", resolved
+        ), mock.patch.object(
+            peer, "_CTRL_BREAK_EVENT", windows.CTRL_BREAK_EVENT
+        ), mock.patch.object(
+            peer.os, "kill", side_effect=fake_kill
+        ), mock.patch.object(
+            peer, "_windows_taskkill", side_effect=fake_taskkill
+        ), mock.patch.object(
+            peer, "_windows_release_job", side_effect=fake_release
+        ), mock.patch.object(
+            peer, "_reap", lambda waited, grace: None
+        ), mock.patch.object(
+            peer, "_await_group_gone", side_effect=[False]
+        ):
+            with self.assertRaises(BridgeError) as caught:
+                peer._cleanup_group(process, 4321, job)
+        self.assertEqual(caught.exception.failure, Failure.CLEANUP_FAILURE)
+
+        # Without the job, no missing root is an emptiness answer: the
+        # cleanup says it cannot confirm descendants instead of returning a
+        # clean verdict on a report that named nothing.
+        with mock.patch.object(peer, "WINDOWS", True), mock.patch.object(
+            peer, "signal", windows
+        ), mock.patch.object(
+            peer, "_CTRL_BREAK_EVENT", windows.CTRL_BREAK_EVENT
+        ), mock.patch.object(
+            peer.os, "kill", side_effect=fake_kill
+        ), mock.patch.object(
+            peer, "_reap", lambda waited, grace: None
+        ):
+            with self.assertRaises(BridgeError) as caught:
+                peer._cleanup_group(process, 4321, None)
+        self.assertEqual(caught.exception.failure, Failure.CLEANUP_FAILURE)
+        self.assertIn("kill-on-close job", caught.exception.detail)
 
     def test_taskkill_is_one_fixed_vector_with_three_honest_answers(self):
         run = mock.Mock(
@@ -1891,7 +2172,8 @@ class WindowsProcessCleanup(unittest.TestCase):
         ):
             self.assertTrue(
                 peer._windows_taskkill(4321),
-                "a tree taskkill cannot find is gone",
+                "the not-found report, read after the job's close has "
+                "terminated every member, is the emptiness answer",
             )
 
         with mock.patch.object(
