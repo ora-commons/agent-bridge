@@ -316,7 +316,13 @@ calls and warns about remaining configuration, tool, and external-effect
 limits; a work call uses the tool's ordinary capabilities under its own
 normal permissions instead, keeps every warning that still applies, and adds
 the ones that matter to work. Bridge never selects an approval bypass to
-make a headless call succeed, and where a tool cannot do non-interactive
+make a headless call succeed, and it selects no permission posture of its
+own either: the work vectors pass no policy flag that would replace the
+tool's effective configured posture (Codex passes no `--sandbox`, MiniMax no
+`--permission`), and where that posture cannot perform the authorized work
+headlessly — Codex under an effective read-only sandbox — the call is
+refused before publication with the limitation and the terminal route.
+Where a tool cannot do non-interactive
 work under ordinary permissions, Bridge reports work unsupported with the
 real diagnostic rather than quietly weakening anything. Warnings do not
 block a usable call, require approval, or store consent. Version or platform

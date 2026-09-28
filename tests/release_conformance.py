@@ -772,8 +772,6 @@ def _work_vector(peer: str, cwd: str, docs: str, image: str) -> str:
             == (
                 "exec",
                 "--skip-git-repo-check",
-                "--sandbox",
-                "workspace-write",
                 "--cd",
                 cwd,
                 "--add-dir",
@@ -784,8 +782,10 @@ def _work_vector(peer: str, cwd: str, docs: str, image: str) -> str:
             )
             and command.body_argument is None
             and "--ignore-user-config" not in argv
-            and "--disable" not in argv,
-            "Codex work vector is not the ordinary configured workspace-write call",
+            and "--disable" not in argv
+            and "--sandbox" not in argv,
+            "Codex work vector is not the ordinary configured call under "
+            "the user's own effective sandbox posture",
         )
     elif peer == "claude":
         _require(
@@ -819,7 +819,7 @@ def _work_vector(peer: str, cwd: str, docs: str, image: str) -> str:
             argv[1:6] == ("exec", "--input", "-", "--input-format", "text")
             and argv[argv.index("--cwd") + 1] == cwd
             and ("--file", image) in zip(argv, argv[1:])
-            and argv[argv.index("--permission") + 1] == "smart"
+            and "--permission" not in argv
             and "--max-steps" not in argv
             and command.body_argument is None,
             "MiniMax work vector is not its ordinary default exec call",

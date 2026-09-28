@@ -644,28 +644,48 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
 
     def setUp(self):
         self.temp = tempfile.mkdtemp(prefix="agent-bridge-work-vectors-")
+        # A hermetic codex home, so the posture the work builder resolves is
+        # the fixture's and never this machine's real configuration.
+        self.codex_home = os.path.join(self.temp, "codex-home")
+        os.makedirs(self.codex_home)
 
     def tearDown(self):
         shutil.rmtree(self.temp, ignore_errors=True)
 
-    def test_codex_work_uses_the_ordinary_configured_workspace_write_call(self):
-        prerequisite = ("/fake/codex", "0.147.0", "Darwin 26 arm64",
-                        (codex.WORK_WARNING,))
-        with mock.patch.object(codex, "_prerequisites", return_value=prerequisite):
-            command = codex.build_work_command(
-                peer.Deadline(60.0),
-                self.temp,
-                access_paths=("/access/one",),
-                attachments=("/img/a.png", "/img/b.png"),
-            )
+    def _codex_config(self, text=None):
+        """Write an optional fixture config and patch CODEX_HOME to it."""
+        if text is not None:
+            with open(
+                os.path.join(self.codex_home, "config.toml"),
+                "w",
+                encoding="utf-8",
+            ) as stream:
+                stream.write(text)
+        return mock.patch.dict(os.environ, {"CODEX_HOME": self.codex_home})
+
+    def test_codex_work_preserves_the_configured_sandbox_posture(self):
+        prerequisite = (
+            "/fake/codex",
+            "0.147.0",
+            "Darwin 26 arm64",
+            (codex._work_warning("workspace-write", "fixture"),),
+        )
+        with self._codex_config('sandbox_mode = "workspace-write"\n'):
+            with mock.patch.object(
+                codex, "_prerequisites", return_value=prerequisite
+            ):
+                command = codex.build_work_command(
+                    peer.Deadline(60.0),
+                    self.temp,
+                    access_paths=("/access/one",),
+                    attachments=("/img/a.png", "/img/b.png"),
+                )
         self.assertEqual(
             command.argv,
             (
                 "/fake/codex",
                 "exec",
                 "--skip-git-repo-check",
-                "--sandbox",
-                "workspace-write",
                 "--cd",
                 self.temp,
                 "--add-dir",
@@ -681,8 +701,73 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
         joined = " ".join(command.argv)
         self.assertNotIn("--ignore-user-config", joined)
         self.assertNotIn("--disable", joined)
-        self.assertNotIn("read-only", joined)
-        self.assertIn(codex.WORK_WARNING, command.warnings)
+        self.assertNotIn("--sandbox", joined)
+        warning = " ".join(command.warnings)
+        self.assertIn("sandbox switch is passed", warning)
+        self.assertIn("workspace-write", warning)
+
+    def test_codex_work_refuses_a_read_only_effective_posture(self):
+        """The one posture ordinary work cannot run under headlessly.
+
+        Both origins of that posture refuse the same way: the user's own
+        configuration naming read-only, and codex's out-of-box default when
+        nothing configures a wider sandbox. The refusal happens inside the
+        work builder, which the runner calls before anything is published.
+        """
+        postures = {
+            "configured read-only": 'sandbox_mode = "read-only"\n',
+            "codex default read-only": "# no sandbox_mode configured\n",
+        }
+        for name, config in postures.items():
+            with self.subTest(origin=name):
+                prerequisite = (
+                    "/fake/codex",
+                    "0.147.0",
+                    "Darwin 26 arm64",
+                    (codex._work_warning("read-only", "fixture"),),
+                )
+                with self._codex_config(config):
+                    with mock.patch.object(
+                        codex, "_prerequisites", return_value=prerequisite
+                    ):
+                        with self.assertRaises(BridgeError) as caught:
+                            codex.build_work_command(
+                                peer.Deadline(60.0), self.temp
+                            )
+                self.assertEqual(
+                    caught.exception.failure,
+                    Failure.WORK_POSTURE_UNAVAILABLE,
+                )
+                self.assertIn("read-only", caught.exception.detail)
+                self.assertIn(
+                    "Next action:", str(caught.exception)
+                )
+
+        # The same refusal through a real work session: the builder raises
+        # inside the turn, before the request is published, so the session
+        # keeps no record of a call that never ran.
+        session_dir = os.path.join(self.temp, "refused-session")
+        record.record(
+            session_dir,
+            "session-create",
+            "A work session this posture cannot serve.\n",
+            initiator="vibe-coder",
+            peer="codex",
+            project=self.temp,
+            mode="work",
+        )
+        with self._codex_config('sandbox_mode = "read-only"\n'):
+            with mock.patch.object(
+                codex,
+                "_prerequisites",
+                return_value=("/fake/codex", "0.147.0", "Darwin 26 arm64", ()),
+            ):
+                with self.assertRaises(BridgeError) as caught:
+                    runner.run_turn(session_dir, "Please work.\n", 30.0)
+        self.assertEqual(
+            caught.exception.failure, Failure.WORK_POSTURE_UNAVAILABLE
+        )
+        self.assertEqual(os.listdir(session.messages_dir(session_dir)), [])
 
     def test_claude_work_carries_no_review_only_restriction_or_flag(self):
         prerequisite = (
@@ -769,8 +854,6 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
                 "text",
                 "--cwd",
                 self.temp,
-                "--permission",
-                "smart",
                 "--timeout",
                 "60000ms",
                 "--file",
@@ -783,8 +866,7 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
         self.assertEqual(
             bounded.argv[bounded.argv.index("--max-steps") + 1], "4"
         )
-        self.assertNotIn("full", " ".join(command.argv))
-        self.assertNotIn("off", " ".join(command.argv))
+        self.assertNotIn("--permission", " ".join(command.argv))
         self.assertIn(minimax.WORK_WARNING, command.warnings)
 
     def test_review_vectors_are_unchanged_by_the_work_additions(self):
