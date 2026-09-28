@@ -706,13 +706,18 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
         self.assertIn("sandbox switch is passed", warning)
         self.assertIn("workspace-write", warning)
 
-    def test_codex_work_refuses_a_read_only_effective_posture(self):
-        """The one posture ordinary work cannot run under headlessly.
+    def test_codex_work_proceeds_with_a_warning_under_an_apparent_read_only_posture(self):
+        """A partial posture reading never rejects a configured work route.
 
-        Both origins of that posture refuse the same way: the user's own
+        Both origins of an apparent read-only posture - the user's own
         configuration naming read-only, and codex's out-of-box default when
-        nothing configures a wider sandbox. The refusal happens inside the
-        work builder, which the runner calls before anything is published.
+        nothing configures a wider sandbox - proceed the same way: no
+        sandbox switch, a warning that names the posture as apparent rather
+        than effective, and codex's own run-time enforcement left to govern,
+        because layers this connector does not read can make the effective
+        posture writable. A call the enforced posture cannot serve fails
+        inside codex with codex's own error, which the runner surfaces with
+        its reason and next action after the request is published.
         """
         postures = {
             "configured read-only": 'sandbox_mode = "read-only"\n',
@@ -720,37 +725,63 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
         }
         for name, config in postures.items():
             with self.subTest(origin=name):
-                prerequisite = (
-                    "/fake/codex",
-                    "0.147.0",
-                    "Darwin 26 arm64",
-                    (codex._work_warning("read-only", "fixture"),),
-                )
                 with self._codex_config(config):
+                    apparent, origin = codex._apparent_sandbox()
+                    self.assertEqual(apparent, "read-only")
+                    self.assertTrue(origin)
+                    prerequisite = (
+                        "/fake/codex",
+                        "0.147.0",
+                        "Darwin 26 arm64",
+                        (codex._work_warning(apparent, origin),),
+                    )
                     with mock.patch.object(
                         codex, "_prerequisites", return_value=prerequisite
                     ):
-                        with self.assertRaises(BridgeError) as caught:
-                            codex.build_work_command(
-                                peer.Deadline(60.0), self.temp
-                            )
+                        command = codex.build_work_command(
+                            peer.Deadline(60.0), self.temp
+                        )
                 self.assertEqual(
-                    caught.exception.failure,
-                    Failure.WORK_POSTURE_UNAVAILABLE,
+                    command.argv,
+                    (
+                        "/fake/codex",
+                        "exec",
+                        "--skip-git-repo-check",
+                        "--cd",
+                        self.temp,
+                        "-",
+                    ),
                 )
-                self.assertIn("read-only", caught.exception.detail)
+                self.assertNotIn("--sandbox", command.argv)
+                warning = " ".join(command.warnings)
+                self.assertIn("apparent posture", warning)
+                self.assertIn("read-only", warning)
                 self.assertIn(
-                    "Next action:", str(caught.exception)
+                    "codex itself resolves and enforces", warning
                 )
+                self.assertIn("trusted project", warning)
+                self.assertIn("managed_config.toml", warning)
+                self.assertIn("fails inside codex", warning)
 
-        # The same refusal through a real work session: the builder raises
-        # inside the turn, before the request is published, so the session
-        # keeps no record of a call that never ran.
-        session_dir = os.path.join(self.temp, "refused-session")
+        # The same posture through a real work session: the call is not
+        # refused before publication. It runs under no posture flag, and a
+        # genuinely read-only effective posture fails inside codex with
+        # codex's own error, surfaced with its reason and next action, while
+        # the record keeps the request that was published.
+        refusing = os.path.join(self.temp, "codex-refuses-headless-work")
+        with open(refusing, "w", encoding="utf-8") as stream:
+            stream.write(
+                "#!/bin/sh\n"
+                "echo 'codex exec: the sandbox is read-only; work that "
+                "writes cannot run headlessly' >&2\n"
+                "exit 1\n"
+            )
+        os.chmod(refusing, 0o755)
+        session_dir = os.path.join(self.temp, "apparent-readonly-session")
         record.record(
             session_dir,
             "session-create",
-            "A work session this posture cannot serve.\n",
+            "A work session under an apparent read-only posture.\n",
             initiator="vibe-coder",
             peer="codex",
             project=self.temp,
@@ -760,14 +791,22 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
             with mock.patch.object(
                 codex,
                 "_prerequisites",
-                return_value=("/fake/codex", "0.147.0", "Darwin 26 arm64", ()),
+                return_value=(
+                    refusing,
+                    "0.147.0",
+                    "Darwin 26 arm64",
+                    (codex._work_warning("read-only", "fixture"),),
+                ),
             ):
                 with self.assertRaises(BridgeError) as caught:
                     runner.run_turn(session_dir, "Please work.\n", 30.0)
+        self.assertEqual(caught.exception.failure, Failure.PEER_FAILURE)
+        self.assertIn("sandbox is read-only", caught.exception.detail)
+        self.assertIn("Next action:", str(caught.exception))
         self.assertEqual(
-            caught.exception.failure, Failure.WORK_POSTURE_UNAVAILABLE
+            os.listdir(session.messages_dir(session_dir)),
+            ["0001-initiator-to-peer.md"],
         )
-        self.assertEqual(os.listdir(session.messages_dir(session_dir)), [])
 
     def test_claude_work_carries_no_review_only_restriction_or_flag(self):
         prerequisite = (
