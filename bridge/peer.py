@@ -23,29 +23,34 @@ running in.
 
 On Windows the same ownership is built with that platform's own primitives,
 because the Unix ones do not exist there. The child is created with
-`CREATE_NEW_PROCESS_GROUP`, which makes it the leader of a brand new group
-numbered by its own process id - the direct twin of the new session, and the
-fact the ownership check relies on rather than reads back. The polite signal is
-the console break event that group exists to receive, a courtesy a child may
-ignore and a console-less caller cannot even send. The guarantee lives
-elsewhere, in ownership that does not need the root alive to be exercised:
-the child is placed in a Windows job object configured to kill on close, and
-everything it later starts is a member of that job with no breakaway allowed,
-so the tree stays owned whichever of its processes dies first. Closing this
-code's handle to the job is the forced phase - the kernel terminates every
-member, root or descendant - and the same close is what happens if Agent
-Bridge itself is killed, because the operating system closes a process's
-handles when it ends. The operating system's own `taskkill /T /F` on the root
-pid remains as a belt-and-braces force and as the confirmation, with one
-limit: its tree walk starts at the root, so once the root has exited,
-not-found says nothing about the descendants it would have named.
-Not-found is therefore read as emptiness only after the job has been closed,
-and a platform that refuses the job refuses the turn - what was just started
-is terminated while its root can still be walked, and the refusal is the
-answer rather than a tree nobody owns. The Unix branches below are untouched
-by all of this, and no Windows machine was available to exercise the Windows
-branches live - they are covered by the unit checks with the Windows
-primitives simulated, and that limit is stated rather than hidden.
+`CREATE_NEW_PROCESS_GROUP` and `CREATE_SUSPENDED`: the first makes it the
+leader of a brand new group numbered by its own process id - the direct twin
+of the new session, and the fact the ownership check relies on rather than
+reads back - and the second leaves its primary thread unstarted, so that not
+one instruction of the child's own has run. The polite signal is the console
+break event that group exists to receive, a courtesy a child may ignore and a
+console-less caller cannot even send. The guarantee lives elsewhere, in
+ownership that does not need the root alive to be exercised and that now
+precedes execution outright: while the child is still suspended it is placed
+in a Windows job object configured to kill on close, and only then is the
+primary thread resumed, so everything the child ever starts - including
+whatever it starts with its first instruction - is a member of that job with
+no breakaway allowed, and the tree stays owned whichever of its processes
+dies first. Closing this code's handle to the job is the forced phase - the
+kernel terminates every member, root or descendant - and the same close is
+what happens if Agent Bridge itself is killed, because the operating system
+closes a process's handles when it ends. The operating system's own
+`taskkill /T /F` on the root pid remains as a belt-and-braces force and as
+the confirmation, with one limit: its tree walk starts at the root, so once
+the root has exited, not-found says nothing about the descendants it would
+have named. Not-found is therefore read as emptiness only after the job has
+been closed, and a platform that refuses the job or the resume refuses the
+turn - what was just started has never run, so it is terminated outright
+with nothing yet beside it, and the refusal is the answer rather than a tree
+nobody owns. The Unix branches below are untouched by all of this, and no
+Windows machine was available to exercise the Windows branches live - they
+are covered by the unit checks with the Windows primitives simulated, and
+that limit is stated rather than hidden.
 
 **What ends the waiting.** Three things can: the program answers, the deadline
 passes, or somebody stops Agent Bridge - with an interrupt from the keyboard, or
@@ -181,6 +186,29 @@ _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 #: process in a job, and the right the job's own termination uses.
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
+
+#: The Windows creation flag that starts the child with its primary thread
+#: suspended: none of the child's own instructions run until `ResumeThread`
+#: is called on that thread, which is what makes job membership precede the
+#: first moment a descendant could exist. The `subprocess` module names no
+#: constant of its own for the flag - its creation-flag exports stop at
+#: `CREATE_BREAKAWAY_FROM_JOB` - so the documented flag value is written here
+#: directly, like the plain Windows numbers around it.
+_CREATE_SUSPENDED = 0x00000004
+
+#: The toolhelp snapshot flag that includes every thread in the system: the
+#: documented way to find a process's threads from its pid alone, which is
+#: how the suspended root's primary thread is reached for the resume.
+_TH32CS_SNAPTHREAD = 0x00000004
+
+#: The thread access the resume needs, and all of it: the one right
+#: `ResumeThread` itself requires, asked of the primary thread and nothing
+#: wider.
+_THREAD_SUSPEND_RESUME = 0x0002
+
+#: What `ResumeThread` returns when it fails: `(DWORD)-1`, unlike every
+#: successful answer, which is a previous suspend count.
+_RESUME_FAILED = 0xFFFFFFFF
 
 
 class Deadline(object):
@@ -509,21 +537,23 @@ def _windows_job_information():
 
 
 def _windows_own_tree(process: "subprocess.Popen") -> int:
-    """Place the started child in a kill-on-close job; return the job handle.
+    """Place the suspended child in a kill-on-close job; return the job handle.
 
-    A process handle with exactly the access the assignment needs is opened
-    on the child's own pid - nothing private of the child's is reached for -
-    and the child is assigned to a fresh job with no name and no limits but
-    the one. Everything the child later starts is a member of that job too,
-    because a member's children are members and the job allows no breakaway,
-    so the handle is ownership of a tree that survives the root's own exit:
-    the kernel terminates every member when the last handle closes, whether
-    that close is this code's in cleanup or the operating system's at the
-    end of this process.
+    The child's primary thread has not run when this is called - the creation
+    left it suspended - so the assignment happens while there is nothing yet
+    beside the child for any job to miss. A process handle with exactly the
+    access the assignment needs is opened on the child's own pid - nothing
+    private of the child's is reached for - and the child is assigned to a
+    fresh job with no name and no limits but the one. Everything the child
+    later starts is a member of that job too, because a member's children are
+    members and the job allows no breakaway, so the handle is ownership of a
+    tree that survives the root's own exit: the kernel terminates every
+    member when the last handle closes, whether that close is this code's in
+    cleanup or the operating system's at the end of this process.
 
     Raises `CLEANUP_FAILURE` naming the step that refused, so the caller can
-    end what it just started while the root is still alive and can still be
-    walked, rather than run a tree nobody owns.
+    end what it just started - still suspended, still childless - rather
+    than run a tree nobody owns.
     """
     import ctypes
 
@@ -586,6 +616,184 @@ def _windows_own_tree(process: "subprocess.Popen") -> int:
         kernel32.CloseHandle(job)
         raise refused("AssignProcessToJobObject", code)
     return job
+
+
+def _windows_thread_entry():
+    """The toolhelp thread record, freshly built, `dwSize` still to be set.
+
+    Only the ctypes shape of `THREADENTRY32` is declared here, and the one
+    fact that must be right is the byte layout `Thread32First` and
+    `Thread32Next` fill - which is why the declaration lives in a function
+    any platform can import and the unit checks can measure. Of the seven
+    fields, two are read on the Windows path: the owning process id the
+    snapshot is filtered by, and the thread id the resume is asked of.
+    """
+    import ctypes
+
+    class thread_entry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_uint32),
+            ("cntUsage", ctypes.c_uint32),
+            ("th32ThreadID", ctypes.c_uint32),
+            ("th32OwnerProcessID", ctypes.c_uint32),
+            ("tpBasePri", ctypes.c_int32),
+            ("tpDeltaPri", ctypes.c_int32),
+            ("dwFlags", ctypes.c_uint32),
+        ]
+
+    return thread_entry()
+
+
+def _windows_resume_root(process: "subprocess.Popen") -> None:
+    """Resume the suspended root: the step that first lets its code run.
+
+    The root was created suspended, so nothing of it has executed when this
+    is called and no descendant exists; the kill-on-close job has already
+    been assigned, so the first instruction that runs - and every process
+    it goes on to start, from its first action on - runs inside an
+    ownership that is already standing. That ordering is the whole of the
+    correction: there is no moment at which the child can execute, or can
+    have started a descendant, outside the job.
+
+    The primary thread is found rather than remembered: `Popen` keeps the
+    process handle and closes the thread handle from creation, so the
+    thread is named through the toolhelp thread snapshot, which the
+    platform documents for exactly this question - enumerate the threads
+    and keep those whose `th32OwnerProcessID` is the process in hand. A
+    process whose primary thread has never run has created no other
+    threads, so the threads found are the primary thread alone, and it is
+    opened with the one access right `ResumeThread` requires.
+
+    Raises `CLEANUP_FAILURE` naming the step that refused, so the caller
+    can end what it started - still suspended, still childless - and
+    refuse the turn rather than run a tree whose first thread it could
+    not set going.
+    """
+    import ctypes
+
+    def refused(step, code):
+        return BridgeError(
+            Failure.CLEANUP_FAILURE,
+            detail=(
+                "{0} refused to resume process {1} (error {2}); "
+                "the turn cannot own what it starts here".format(
+                    step, process.pid, code
+                )
+            ),
+        )
+
+    kernel32 = _windows_kernel32()
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel32.CreateToolhelp32Snapshot.argtypes = (
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+    )
+    kernel32.Thread32First.restype = ctypes.c_int
+    kernel32.Thread32First.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    kernel32.Thread32Next.restype = ctypes.c_int
+    kernel32.Thread32Next.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    kernel32.OpenThread.restype = ctypes.c_void_p
+    kernel32.OpenThread.argtypes = (
+        ctypes.c_uint32,
+        ctypes.c_int,
+        ctypes.c_uint32,
+    )
+    kernel32.ResumeThread.restype = ctypes.c_uint32
+    kernel32.ResumeThread.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        raise refused("CreateToolhelp32Snapshot", ctypes.get_last_error())
+    entry = _windows_thread_entry()
+    entry.dwSize = ctypes.sizeof(entry)
+    step = None
+    code = 0
+    resumed = False
+    more = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+    while more:
+        if entry.th32OwnerProcessID == process.pid:
+            thread = kernel32.OpenThread(
+                _THREAD_SUSPEND_RESUME, False, entry.th32ThreadID
+            )
+            if not thread:
+                step, code = "OpenThread", ctypes.get_last_error()
+                break
+            prior = kernel32.ResumeThread(thread)
+            code = ctypes.get_last_error()
+            kernel32.CloseHandle(thread)
+            if prior == _RESUME_FAILED:
+                step = "ResumeThread"
+                break
+            resumed = True
+        more = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+    kernel32.CloseHandle(snapshot)
+    if step is not None:
+        raise refused(step, code)
+    if not resumed:
+        # No thread of the process was in the snapshot at all, which a
+        # never-run process cannot explain by exiting - its thread cannot
+        # have run to an exit. The turn is refused rather than guessed
+        # about, exactly as for a step that refused.
+        raise BridgeError(
+            Failure.CLEANUP_FAILURE,
+            detail=(
+                "the thread snapshot named no thread of process {0} to "
+                "resume; the turn cannot own what it starts here".format(
+                    process.pid
+                )
+            ),
+        )
+
+
+def _windows_end_root(process: "subprocess.Popen") -> None:
+    """Terminate the started root outright: the deterministic end of a
+    child that never ran.
+
+    Reached on the two refusals that follow a suspended creation - the job
+    could not be established, or the root could not be resumed. In both,
+    nothing of the child's code has ever executed, so no descendant exists
+    and the root alone is the whole of what must end. A process handle with
+    exactly the right termination needs is opened on the child's own pid,
+    as the assignment's was, and `TerminateProcess` is the whole of the
+    ending: a suspended process can neither resist it nor postpone it, and
+    there is nothing beside the root for a tree walk to be needed for.
+
+    Raises `CLEANUP_FAILURE` naming the step that refused rather than
+    pretending a survivor is gone.
+    """
+    import ctypes
+
+    def refused(step, code):
+        return BridgeError(
+            Failure.CLEANUP_FAILURE,
+            detail=(
+                "{0} refused to terminate the never-run process {1} "
+                "(error {2}); the turn cannot own what it starts here"
+                .format(step, process.pid, code)
+            ),
+        )
+
+    kernel32 = _windows_kernel32()
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = (
+        ctypes.c_uint32,
+        ctypes.c_int,
+        ctypes.c_uint32,
+    )
+    kernel32.TerminateProcess.restype = ctypes.c_int
+    kernel32.TerminateProcess.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+    kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    handle = kernel32.OpenProcess(_PROCESS_TERMINATE, False, process.pid)
+    if not handle:
+        raise refused("OpenProcess", ctypes.get_last_error())
+    terminated = kernel32.TerminateProcess(handle, 1)
+    code = ctypes.get_last_error()
+    kernel32.CloseHandle(handle)
+    if not terminated:
+        raise refused("TerminateProcess", code)
 
 
 def _windows_release_job(job: int) -> None:
@@ -855,12 +1063,17 @@ def run_bounded(
                     "close_fds": True,
                 }
                 if WINDOWS:
-                    # The Windows twin of the new session: a new process
-                    # group, led by the child and numbered by its own pid.
-                    # `start_new_session` has no meaning there, and the
-                    # creation flag has no meaning on POSIX, so the branch is
-                    # the whole difference between the two platforms.
-                    spawn["creationflags"] = _CREATE_NEW_PROCESS_GROUP
+                    # The Windows twin of the new session - a new process
+                    # group, led by the child and numbered by its own pid -
+                    # combined with the flag that starts the child's primary
+                    # thread suspended, so that none of its code runs until
+                    # this code resumes it below. `start_new_session` has no
+                    # meaning there, and the creation flags have no meaning
+                    # on POSIX, so the branch is the whole difference
+                    # between the two platforms.
+                    spawn["creationflags"] = (
+                        _CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED
+                    )
                 else:
                     spawn["start_new_session"] = True
                 try:
@@ -889,22 +1102,29 @@ def run_bounded(
                     raise BridgeError(spawn_failure, detail=str(exc))
                 pgid = _own_group(process)
                 if WINDOWS:
-                    # Ownership that survives the root's own exit: the
-                    # kill-on-close job holding the child and everything it
-                    # starts. A platform that refuses the job refuses the
-                    # turn - what was just started is terminated and
-                    # collected while its root is alive and can still be
-                    # walked, and the refusal is the answer - because the
-                    # alternative is a tree nobody owns and a not-found
-                    # report mistaken for confirmation. `pgid` is handed
-                    # back so the cleanup below knows the responsibility has
-                    # already been taken.
+                    # Ownership is established before execution. The child
+                    # was created suspended, the kill-on-close job is
+                    # created and assigned while it has run nothing, and
+                    # only then is its primary thread resumed - so there is
+                    # no moment at which the child can be running, or can
+                    # have started a descendant, outside the job. A platform
+                    # that refuses the job or the resume refuses the turn:
+                    # what was started has never run, so it is terminated
+                    # outright with nothing yet beside it to miss, any job
+                    # already taken is released, and the refusal is the
+                    # answer - because the alternative is a tree nobody
+                    # owns. `pgid` is handed back so the cleanup below knows
+                    # the responsibility has already been taken.
                     try:
                         job = _windows_own_tree(process)
+                        _windows_resume_root(process)
                     except BridgeError:
-                        _windows_taskkill(pgid)
+                        _windows_end_root(process)
+                        if job is not None:
+                            _windows_release_job(job)
                         _reap(process, ESCALATION_GRACE_SECONDS)
                         pgid = None
+                        job = None
                         raise
                 with watch.allowing():
                     # The wait is one deadline-watched loop rather than one
@@ -946,9 +1166,9 @@ def run_bounded(
                         # Still deferred, so a second stop cannot abandon this
                         # half done. When the group was never this turn's to
                         # signal, `_own_group` has already said so - or, on
-                        # Windows, the job-refusal path has already ended
-                        # what it started - and nothing here signals
-                        # anything.
+                        # Windows, the job- or resume-refusal path has
+                        # already ended what it started - and nothing here
+                        # signals anything.
                         if pgid is not None:
                             _cleanup_group(process, pgid, job)
                     finally:

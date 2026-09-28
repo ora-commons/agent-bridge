@@ -53,14 +53,16 @@ combination; it does not install or update anything on a user's machine.
 Two platform twins were added on September 28, 2026 for Windows, where no
 machine was available to test them live: the session lock takes its advisory
 lock with `msvcrt.locking` there (`fcntl.flock` on POSIX), and child-process
-cleanup creates the peer with `CREATE_NEW_PROCESS_GROUP`, holds the whole
-descendant tree in a kill-on-close job object, and terminates it by closing
-that job — with the operating system's `taskkill /T /F` as a belt-and-braces
-force and as the confirmation, so tree ownership survives the peer's own exit
-(process-group signals on POSIX). Both Windows branches are exercised only
-by unit tests with the platform's primitives simulated; no live Windows
-qualification is claimed, and the connector qualifications above remain
-macOS.
+cleanup creates the peer with `CREATE_NEW_PROCESS_GROUP` and
+`CREATE_SUSPENDED`, assigns the kill-on-close job object while the peer has
+not yet executed one instruction, resumes the peer only then, and terminates
+the whole descendant tree by closing that job — with the operating system's
+`taskkill /T /F` as a belt-and-braces force and as the confirmation, so the
+tree is owned from the peer's first possible action and ownership survives
+the peer's own exit (process-group signals on POSIX). Both Windows branches
+are exercised only by unit tests with the platform's primitives simulated; no
+live Windows qualification is claimed, and the connector qualifications above
+remain macOS.
 
 ## Requirements and source setup
 
