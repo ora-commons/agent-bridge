@@ -81,6 +81,20 @@ def _read_body() -> str:
     return sys.stdin.read()
 
 
+def _write_stdout(text: str) -> None:
+    """Write one piece of standard output and push it out of the buffer now.
+
+    Python buffers standard output when it is a pipe, and a caller watching a
+    run's event stream is watching a pipe: an unflushed write would sit in
+    the buffer until the process ended, which for a long turn is the whole
+    turn. Every line this command means to deliver as it happens - the
+    lifecycle events, and the terminal response-path line - goes through
+    here, so each one is flushed the moment it is written.
+    """
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
 def _remove_neutral(path: str, during: Optional[BaseException]) -> None:
     try:
         shutil.rmtree(path)
@@ -180,7 +194,7 @@ def _check_json(args: argparse.Namespace) -> int:
 def _run(args: argparse.Namespace) -> Optional[str]:
     event_writer = None
     if args.events_jsonl:
-        event_writer = lambda event: sys.stdout.write(event)
+        event_writer = _write_stdout
     result = runner.run_turn(
         session_dir=args.session,
         body=_read_body(),
@@ -242,5 +256,5 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sys.stderr.write(str(error) + "\n")
         return 1
     if written is not None:
-        sys.stdout.write(written + "\n")
+        _write_stdout(written + "\n")
     return 0

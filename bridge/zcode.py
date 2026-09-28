@@ -250,13 +250,15 @@ CAPABILITIES = connectors.Capabilities(
     ),
 )
 
-#: The switches beyond the review set that a work turn relies on. `--mode` and
-#: `--cwd` are already proven by the review set and its no-turn probe;
-#: `--attach` is the work-only switch, present in this build's help and proven
-#: by the earlier executable probe that handed a --attach path to the model.
-WORK_RESTRICTIONS = (
-    "--attach",
-)
+#: The switches a work turn relies on, looked for in the help text this build
+#: prints reliably for them and proven together by the no-turn parser probe
+#: below, which passes them to a subcommand that spends no model turn.
+#: `--attach` is required only when an attachment travels, because a plain
+#: work turn never passes it. The review-only `--disallowed-tools` switch is
+#: not a work prerequisite: the work vector never passes it, so the work-mode
+#: parser probe does not pass it either.
+WORK_RESTRICTIONS = ("--prompt", "--mode", "--cwd")
+WORK_ATTACHMENT_RESTRICTIONS = ("--attach",)
 
 WORK_WARNING = (
     "ZCode work runs in edit mode: workspace file edits are allowed "
@@ -586,7 +588,10 @@ def _plugin_fact(
 
 
 def _prerequisites(
-    deadline: Deadline, cwd: str, work: bool = False
+    deadline: Deadline,
+    cwd: str,
+    work: bool = False,
+    attachments: Sequence[str] = (),
 ) -> Tuple[str, str, str, str, Tuple[str, ...]]:
     """Everything that has to be true before starting ZCode is worth doing.
 
@@ -596,10 +601,14 @@ def _prerequisites(
     sign-in, does any enabled plugin expose what no switch can remove, and are
     the switches the turn relies on really accepted - proven by passing them to
     a subcommand that spends no turn, because this program's help text lists
-    switches its parser rejects. A work turn additionally proves the work-only
-    switches exist. Missing software, minimum local sign-in state, or required
-    mechanics raises; plugin exposure or uncertainty and the lack of live OAuth
-    evidence are returned as warnings.
+    switches its parser rejects. The switch set is the vector's own: a review
+    turn proves the review switches, deny list included, and a work turn
+    proves the work switches - `--prompt`, `--mode edit`, `--cwd`,
+    `--output-format`, and `--attach` when an attachment travels - without the
+    review deny list, which a work call never passes. Missing software,
+    minimum local sign-in state, or required mechanics raises; plugin exposure
+    or uncertainty and the lack of live OAuth evidence are returned as
+    warnings.
 
     Returns the four facts a readiness report needs and a turn uses: the
     program as it is started, which version answered, how this computer
@@ -617,9 +626,10 @@ def _prerequisites(
     plugins = _plugin_fact(runtime, script, deadline, cwd)
 
     help_call = connectors.probe((runtime, script, "--help"), cwd, deadline)
-    connectors.qualified_restrictions(help_call, QUALIFICATION)
-    mode = "edit" if work else "plan"
     if work:
+        switches = WORK_RESTRICTIONS
+        if attachments:
+            switches += WORK_ATTACHMENT_RESTRICTIONS
         connectors.qualified_restrictions(
             help_call,
             connectors.Qualification(
@@ -628,22 +638,17 @@ def _prerequisites(
                 os_family=QUALIFICATION.os_family,
                 os_major_versions=QUALIFICATION.os_major_versions,
                 architectures=QUALIFICATION.architectures,
-                restrictions=WORK_RESTRICTIONS,
+                restrictions=switches,
             ),
         )
+        parser_switches = ("--mode", "edit", "--cwd", cwd)
+        parser_names = ("--mode", "--cwd") + OUTPUT_FORMAT[:1]
+    else:
+        connectors.qualified_restrictions(help_call, QUALIFICATION)
+        parser_switches = ("--disallowed-tools", "Edit", "--mode", "plan", "--cwd", cwd)
+        parser_names = QUALIFICATION.restrictions + OUTPUT_FORMAT[:1]
     accepted = connectors.probe(
-        (
-            runtime,
-            script,
-            "version",
-            "--disallowed-tools",
-            "Edit",
-            "--mode",
-            mode,
-            "--cwd",
-            cwd,
-        )
-        + OUTPUT_FORMAT,
+        (runtime, script, "version") + parser_switches + OUTPUT_FORMAT,
         cwd,
         deadline,
     )
@@ -652,10 +657,11 @@ def _prerequisites(
             Failure.RESTRICTIONS_UNAVAILABLE,
             detail="zcode rejected {0} on a subcommand that spends no turn: "
             "{1}".format(
-                ", ".join(QUALIFICATION.restrictions + OUTPUT_FORMAT[:1]),
+                ", ".join(parser_names),
                 (accepted.stderr or accepted.stdout).strip()[:160],
             ),
         )
+    mode = "edit" if work else "plan"
     if work:
         warnings.append(WORK_WARNING)
     warnings.append(
@@ -687,7 +693,8 @@ def check(
     nothing is written down for next time. The one thing that may be written is the
     launcher's pair of links, when the bundle needs them to be started at all;
     they hold no state and are checked again by every call. A work-mode check
-    also proves the work vector's own switches exist on the installed version.
+    proves the work vector's own switches - and, in the no-turn parser probe,
+    passes no review deny-list switch the work command never carries.
     """
     program, version, described, account, warnings = _prerequisites(
         deadline, cwd, work=(mode == "work")
@@ -763,7 +770,7 @@ def build_work_command(
     """
     runtime, script = _program()
     _program_name, _version, _described, _account, warnings = _prerequisites(
-        deadline, cwd, work=True
+        deadline, cwd, work=True, attachments=attachments
     )
     argv = [runtime, script, "--mode", "edit", "--cwd", cwd]
     for attachment in attachments:

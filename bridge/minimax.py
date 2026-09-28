@@ -68,11 +68,17 @@ CAPABILITIES = connectors.Capabilities(
     ),
 )
 
-#: The switch beyond the review set that a work turn relies on, verified
-#: against the installed program's own help before any request is published.
-WORK_RESTRICTIONS = (
-    "--file",
-)
+#: The switches a work turn relies on, verified against the installed
+#: program's own help before any request is published. The `exec` subcommand
+#: itself is proved by the help probe that carries these switches: a program
+#: without it would not answer `mcode exec --help`. The review-only
+#: `--permission` switch is not a work prerequisite - the work vector passes
+#: no permission policy at all - and the three optional switches are required
+#: only when the work vector actually emits them.
+WORK_RESTRICTIONS = ("--input", "--input-format", "--cwd", "--output-format")
+WORK_TIMEOUT_RESTRICTION = ("--timeout",)
+WORK_ATTACHMENT_RESTRICTIONS = ("--file",)
+WORK_STEPS_RESTRICTIONS = ("--max-steps",)
 
 WORK_WARNING = (
     "MiniMax Code work runs with the program's ordinary headless defaults "
@@ -167,8 +173,24 @@ def parse_response(output: str, required_model: str) -> str:
 
 
 def _prerequisites(
-    deadline: Deadline, cwd: str, work: bool = False
+    deadline: Deadline,
+    cwd: str,
+    work: bool = False,
+    attachments: Sequence[str] = (),
+    max_steps: Optional[int] = None,
 ) -> Tuple[str, str, str, str, Tuple[str, ...]]:
+    """Readiness facts and the switches the selected mode's vector relies on.
+
+    A review turn proves the review vector's whole switch set, `--permission`
+    included, because that vector passes them all. A work turn proves only
+    what the work vector passes: the standard-input, format, and
+    working-directory switches always; `--timeout` when the deadline is one
+    the vector can hand to the program; `--file` when an attachment travels;
+    and `--max-steps` when the caller names a bound. The review-only switches
+    are not work prerequisites, because a work call passes none of them.
+    Authentication stays honestly unconfirmed in both modes: MiniMax has no
+    state-free noninteractive authentication check, and none is invented here.
+    """
     warnings = []  # type: List[str]
     program = connectors.executable(QUALIFICATION.cli_identity)
     version = connectors.qualified_version(
@@ -178,8 +200,14 @@ def _prerequisites(
     )
     described = connectors.qualified_platform(QUALIFICATION, warnings)
     help_call = connectors.probe((program, "exec", "--help"), cwd, deadline)
-    connectors.qualified_restrictions(help_call, QUALIFICATION)
     if work:
+        switches = WORK_RESTRICTIONS
+        if deadline.seconds <= MAX_NATIVE_TIMEOUT_MILLISECONDS / 1000.0:
+            switches += WORK_TIMEOUT_RESTRICTION
+        if attachments:
+            switches += WORK_ATTACHMENT_RESTRICTIONS
+        if max_steps is not None:
+            switches += WORK_STEPS_RESTRICTIONS
         connectors.qualified_restrictions(
             help_call,
             connectors.Qualification(
@@ -188,11 +216,12 @@ def _prerequisites(
                 os_family=QUALIFICATION.os_family,
                 os_major_versions=QUALIFICATION.os_major_versions,
                 architectures=QUALIFICATION.architectures,
-                restrictions=WORK_RESTRICTIONS,
+                restrictions=switches,
             ),
         )
         warnings.append(WORK_WARNING)
     else:
+        connectors.qualified_restrictions(help_call, QUALIFICATION)
         warnings.append(WARNING)
     warnings.append(
         "MiniMax has no state-free noninteractive authentication check: "
@@ -310,7 +339,7 @@ def build_work_command(
     """
     validate_run_options(max_steps, required_model)
     program, _version, _described, _account, warnings = _prerequisites(
-        deadline, cwd, work=True
+        deadline, cwd, work=True, attachments=attachments, max_steps=max_steps
     )
     native_timeout = (
         (

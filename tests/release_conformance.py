@@ -759,9 +759,18 @@ def _work_vector(peer: str, cwd: str, docs: str, image: str) -> str:
         attachments=(image,) if connector.CAPABILITIES.image == "supported" else (),
     )
     argv = command.argv
+    # A connector whose body travels as one bound command-line argument
+    # carries its prompt switch there, so that prefix is part of the vector
+    # a work switch may legitimately live in - the same surface the
+    # restriction-vector inspection below reads.
+    surface = (
+        argv + (command.body_argument,)
+        if command.body_argument is not None
+        else argv
+    )
     for switch in connector.WORK_RESTRICTIONS:
         _require(
-            any(switch in argument for argument in argv),
+            any(switch in argument for argument in surface),
             "{0}'s production work vector omits {1}".format(peer, switch),
         )
     _require(os.path.abspath(command.cwd) == os.path.abspath(cwd), "connector cwd drifted")

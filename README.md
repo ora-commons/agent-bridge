@@ -50,6 +50,16 @@ No other platform qualification is claimed. There is no support, maintenance,
 or future compatibility promise. Qualification describes the source and CLI
 combination; it does not install or update anything on a user's machine.
 
+Two platform twins were added on September 28, 2026 for Windows, where no
+machine was available to test them live: the session lock takes its advisory
+lock with `msvcrt.locking` there (`fcntl.flock` on POSIX), and child-process
+cleanup creates the peer with `CREATE_NEW_PROCESS_GROUP` and terminates the
+descendant tree with the operating system's own `taskkill /T /F`
+(process-group signals on POSIX). Both Windows branches are exercised only
+by unit tests with the platform's primitives simulated; no live Windows
+qualification is claimed, and the connector qualifications above remain
+macOS.
+
 ## Requirements and source setup
 
 You need Python 3.9 or later and the selected target's official CLI with its own
@@ -179,8 +189,13 @@ store two inert pairing labels in the request header. With
 `--events-jsonl`, standard output becomes one JSON object per line —
 `started`, periodic `heartbeat` check-ins, and one final `finished` event
 carrying the response path or the plain failure — while standard error stays
-diagnostics. `check` accepts `--mode review|work` and `--json` for one
-machine-readable readiness result. Codex, Claude Code, ZCode, and MiniMax
+diagnostics; every event line, like the response-path line a flag-free run
+prints, is flushed to standard output the moment it is written, so a caller
+reading a pipe sees it during the turn rather than at exit. `check` accepts
+`--mode review|work` and `--json` for one machine-readable readiness result;
+a work-mode check qualifies the work vector's own switches, never the
+review-only ones, and asks none of the review call's policy questions.
+Codex, Claude Code, ZCode, and MiniMax
 Code have qualified work routes; Hermes Agent and Qwen Code answer work
 unsupported with the real reason and the terminal route. The complete
 contract, including every field and the per-target work and image table, is

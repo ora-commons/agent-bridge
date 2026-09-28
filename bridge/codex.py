@@ -9,9 +9,10 @@ There are three operations here and nothing else. `check` answers whether Codex
 could be used right now. `build_command` composes the one fixed argument vector
 a review turn runs. `build_work_command` composes the ordinary configured
 `codex exec` a work turn runs. All of them do the same inexpensive
-prerequisites first (the work ones adding the work vector's own switches),
-because a turn that skipped them would find out about a missing sign-in or a
-renamed switch in the middle of real work, with the peer already running.
+prerequisites first (the work ones proving the work vector's own switches
+instead of the review set, which a work vector passes none of), because a turn
+that skipped them would find out about a missing sign-in or a renamed switch in
+the middle of real work, with the peer already running.
 
 **How the answer comes back.** `codex exec` puts its banner, the prompt it was
 handed, its warnings and its errors on the error stream, and puts only the final
@@ -62,7 +63,10 @@ it, it is a loosening.
 them: where the program is, `codex --version`, `codex login status`, and
 `codex exec --help`. The sign-in answer is read from the exit status rather
 than from the words, because Codex prints `Logged in using ChatGPT` on the error
-stream along with everything else it has to say about itself.
+stream along with everything else it has to say about itself. A review turn
+reads the help for the review vector's restriction switches; a work turn reads
+it for the work vector's own switches only, because the review-only switches
+are not a prerequisite of a call that passes none of them.
 
 SPDX-License-Identifier: CC0-1.0
 """
@@ -146,12 +150,17 @@ CAPABILITIES = connectors.Capabilities(
     ),
 )
 
-#: The switches beyond the review set that a work turn relies on, verified
-#: against the installed program's own help before any request is published.
-WORK_RESTRICTIONS = (
-    "--add-dir",
-    "--image",
-)
+#: The switches a work turn relies on, verified against the installed
+#: program's own help before any request is published. The `exec` subcommand
+#: itself is proved by the help probe that carries these switches: a program
+#: without it would not answer `codex exec --help`. The review-only
+#: restriction set is not a work prerequisite - the work vector passes none of
+#: those switches - and neither are `--add-dir` or `--image` unless the
+#: session declares an access directory or sends an attachment, because a
+#: plain work turn passes neither.
+WORK_RESTRICTIONS = ("--skip-git-repo-check", "--cd")
+WORK_ACCESS_RESTRICTIONS = ("--add-dir",)
+WORK_ATTACHMENT_RESTRICTIONS = ("--image",)
 
 #: The sandbox postures `codex exec` accepts, and the posture its own
 #: documented default runs in when nothing configures another. The default is
@@ -296,7 +305,11 @@ def _work_warning(posture: str, origin: str) -> str:
 
 
 def _prerequisites(
-    deadline: Deadline, cwd: str, work: bool = False
+    deadline: Deadline,
+    cwd: str,
+    work: bool = False,
+    access_paths: Sequence[str] = (),
+    attachments: Sequence[str] = (),
 ) -> Tuple[str, str, str, Tuple[str, ...]]:
     """Everything that has to be true before starting Codex is worth doing.
 
@@ -304,8 +317,12 @@ def _prerequisites(
     the program here, is its version one this connector was tested against, is
     this computer one it was tested on, is somebody signed in, and does the
     installed version still have every switch the turn relies on - the review
-    set, plus the work set when a work turn is being composed. Any of them
-    failing raises, so nothing further happens.
+    set for a review turn, and for a work turn the work vector's own switches:
+    the working-root and no-repository switches always, `--add-dir` when an
+    access directory is declared, and `--image` when an attachment travels.
+    The review-only switches are not a work prerequisite, because a work
+    vector passes none of them. Any failing question raises, so nothing
+    further happens.
 
     Returns the three facts a readiness report needs and a turn uses: where
     the program is, which version answered, and how this computer describes itself.
@@ -329,8 +346,12 @@ def _prerequisites(
         )
 
     help_call = connectors.probe((program, "exec", "--help"), cwd, deadline)
-    connectors.qualified_restrictions(help_call, QUALIFICATION)
     if work:
+        switches = WORK_RESTRICTIONS
+        if access_paths:
+            switches += WORK_ACCESS_RESTRICTIONS
+        if attachments:
+            switches += WORK_ATTACHMENT_RESTRICTIONS
         connectors.qualified_restrictions(
             help_call,
             connectors.Qualification(
@@ -339,12 +360,13 @@ def _prerequisites(
                 os_family=QUALIFICATION.os_family,
                 os_major_versions=QUALIFICATION.os_major_versions,
                 architectures=QUALIFICATION.architectures,
-                restrictions=WORK_RESTRICTIONS,
+                restrictions=switches,
             ),
         )
         posture, origin = _apparent_sandbox()
         warnings.append(_work_warning(posture, origin))
     else:
+        connectors.qualified_restrictions(help_call, QUALIFICATION)
         warnings.append(WARNING)
     return program, version, described, tuple(warnings)
 
@@ -454,7 +476,8 @@ def build_work_command(
     and next action.
     """
     program, _version, _described, warnings = _prerequisites(
-        deadline, cwd, work=True
+        deadline, cwd, work=True, access_paths=access_paths,
+        attachments=attachments,
     )
     argv = [
         program,
