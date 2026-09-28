@@ -236,9 +236,13 @@ Only a session targeting MiniMax may add `--max-steps <positive-integer>` or
 MiniMax's default one-assistant-step bound. The second makes Bridge inspect the
 MiniMax 0.2.7 JSON result, require a byte-exact runtime provider/model identity,
 and publish only its final answer text. Bridge validates that identity; it does
-not select or change the model. Omitting both options preserves the one-step,
-plain-text MiniMax call, and either option is refused for every other target
-before request publication.
+not select or change the model, and it preserves what the tool reported: the
+`finished` event carries optional `model` and `provider` fields, and a Format 3
+response record carries `Model:` and `Provider:` header lines, present only
+when MiniMax reported them. The other five targets' outputs report no identity,
+so their events and records never grow the fields. Omitting both options
+preserves the one-step, plain-text MiniMax call, and either option is refused
+for every other target before request publication.
 
 ## Using Bridge from an application
 

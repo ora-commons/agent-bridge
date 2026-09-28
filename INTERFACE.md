@@ -168,7 +168,13 @@ call only. A required model changes MiniMax's internal output to JSON; Bridge
 accepts only a successful schema-version-1 `exec.result` whose reported
 `providerId/modelId` is byte-for-byte identical, then publishes only the final
 string output. This validates runtime identity and does not select a provider or
-model. Omitting both controls preserves the existing one-step plain-text call.
+model. The validated identity is preserved rather than discarded: the `finished`
+event carries it as optional `model` and `provider` fields, and a Format 3
+response record carries it as `Model:` and `Provider:` header lines (section 7).
+MiniMax's JSON mode is today the only fixed output route that reports identity;
+the other five connectors' outputs carry none, so their events and records never
+grow the fields. Omitting both controls preserves the existing one-step
+plain-text call, which reports no identity.
 In a work session, `--max-steps` is forwarded when given and omitted otherwise,
 so the review-only one-step assumption does not apply to work.
 
@@ -218,7 +224,7 @@ With `--events-jsonl`, standard output carries one JSON object per line — life
  "warnings": ["...the same warnings standard error carried..."]}
 ```
 
-A heartbeat means Bridge is alive and can report whether its child process is still running; it is not progress and carries no percentages. Heartbeats arrive while prerequisite probes or the peer call are waiting (`phase` says which), about every 30 seconds, and both bounded waits share the turn's one deadline. The final `finished` event carries `outcome` (`success`, `failure`, or `stopped`), `request_path` and `response_path` when published, the warnings, and — for `failure` — a plain `reason` and `next_action`; internal exception names stay internal. A `success` event follows durable response publication. A failed call still exits nonzero. If the event pipe breaks, the turn runs on and its records decide the truth: a broken pipe can never turn an unfinished call into a reported success.
+A heartbeat means Bridge is alive and can report whether its child process is still running; it is not progress and carries no percentages. Heartbeats arrive while prerequisite probes or the peer call are waiting (`phase` says which), about every 30 seconds, and both bounded waits share the turn's one deadline. The final `finished` event carries `outcome` (`success`, `failure`, or `stopped`), `request_path` and `response_path` when published, the warnings, and — for `failure` — a plain `reason` and `next_action`; internal exception names stay internal. A `success` event may additionally carry `model` and `provider` when the target's own structured output reported the identity that answered — MiniMax's `--require-model` JSON mode is the one such route today — and both fields are absent when it did not, never empty strings; they state what the tool reported, never a Bridge selection. A `success` event follows durable response publication. A failed call still exits nonzero. If the event pipe breaks, the turn runs on and its records decide the truth: a broken pipe can never turn an unfinished call into a reported success.
 
 Stop signals, `--timeout`, interruption, cleanup, and the single deadline behave exactly as for any other run; there is no separate cancellation daemon or command service.
 
@@ -351,7 +357,22 @@ Answers: 0001
 <final answer copied unchanged>
 ```
 
-`Note-Ref:` and `Purpose:` appear once each when given; `Attachment:` appears once per attached file; `Answers:` carries the request's four-digit sequence. None of it is appended to or read from the body, which stays byte-exact under `## Body`.
+A Format 3 response whose target's own structured output reported the identity that answered additionally carries that report in its header:
+
+```markdown
+# Message 0002
+From: minimax
+To: vibe-coder
+Answers: 0001
+Model: MiniMax-M2.5
+Provider: minimax
+
+## Body
+
+<final answer copied unchanged>
+```
+
+`Note-Ref:` and `Purpose:` appear once each when given; `Attachment:` appears once per attached file; `Answers:` carries the request's four-digit sequence. `Model:` and `Provider:` carry the exact strings the tool reported for the call — MiniMax's `--require-model` JSON mode is the one route today — and each appears only when that half was reported, never as an empty placeholder; a Format 2 response never carries them, and its shape is unchanged. None of it is appended to or read from the body, which stays byte-exact under `## Body`.
 
 Neutral note:
 
@@ -375,7 +396,7 @@ A caller may read everything it needs from the retained records alone, in plain 
 
 - From `SESSION.md`: the session's working `Mode:` and every declared `Access-Path:` directory, beside the immutable initiator, target, and project.
 - From each request file: its sequence in the title line, its exact body below `## Body` (byte-exact, never modified), and its `Note-Ref:`, `Purpose:`, and `Attachment:` header lines when the caller supplied them.
-- From each response file: its path, its body below `## Body`, and the request sequence it `Answers:`.
+- From each response file: its path, its body below `## Body`, the request sequence it `Answers:`, and the `Model:` and `Provider:` lines the tool's own output reported for that call, when it reported an identity at all.
 
 Headers are always the block between the title line and the first blank line; everything below `## Body` is inert text. Bridge owns this surface and will keep it readable.
 

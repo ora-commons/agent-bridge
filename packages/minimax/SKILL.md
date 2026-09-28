@@ -125,8 +125,11 @@ Use `--max-steps` only when the caller deliberately needs more than MiniMax's
 default one assistant step. Use `--require-model` when the caller must reject a
 response unless MiniMax reports that exact runtime provider/model identity.
 Bridge does not select or change that model: it switches MiniMax's internal
-result to JSON, validates the returned identity exactly, and records only the
-final answer text. Other targets reject either option before publishing the
+result to JSON, validates the returned identity exactly, and publishes only the
+final answer text, carrying the validated identity beside it — optional `model`
+and `provider` fields on the `finished` event, and `Model:`/`Provider:` header
+lines on a Format 3 response record — so a caller can read back which identity
+actually answered. Other targets reject either option before publishing the
 request. Omitting both keeps MiniMax's existing one-step, plain-text behavior.
 
 Before starting, tell the user which target will be called and which session

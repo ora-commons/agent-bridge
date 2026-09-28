@@ -142,7 +142,16 @@ def validate_run_options(
 
 
 def parse_response(output: str, required_model: str) -> str:
-    """Return final text only after strict MiniMax ExecResult validation."""
+    """Final text, carrying the reported identity, after strict validation.
+
+    The validation is unchanged: a schema-version-1 successful `exec.result`
+    whose `providerId/modelId` is byte-for-byte the required model. The
+    return is that validated identity's own final output text, returned as
+    `AttributedText` so the provider and model MiniMax itself reported -
+    the exact pair just validated - travel with the answer instead of being
+    discarded. To every reader that compares, publishes, or parses it, the
+    value is the plain final output string.
+    """
     try:
         result = json.loads(output)
     except (TypeError, ValueError) as exc:
@@ -169,7 +178,9 @@ def parse_response(output: str, required_model: str) -> str:
     if actual_model.encode("utf-8") != required_model.encode("utf-8"):
         detail = "minimax runtime model {0!r} did not exactly match required model {1!r}"
         raise _invalid_result(detail.format(actual_model, required_model))
-    return text
+    return connectors.AttributedText(
+        text, provider=provider_id, model=model_id
+    )
 
 
 def _prerequisites(

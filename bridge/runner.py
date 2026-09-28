@@ -14,6 +14,13 @@ one `finished` event - the last only after durable publication or an honest
 failure, so a broken event pipe can never make an unfinished call look
 finished.
 
+When a target's own structured output reports which model and provider
+answered, that reported identity is preserved rather than discarded after
+validation: the finished event carries it as optional `model` and `provider`
+fields, and a Format 3 response record carries it as `Model:` and `Provider:`
+header lines. Each half appears only when the tool reported it, never as an
+empty placeholder, and the published response body stays the final text alone.
+
 SPDX-License-Identifier: CC0-1.0
 """
 
@@ -496,6 +503,8 @@ def run_turn(
                         detail=_peer_failure_detail(call, command, body),
                     )
                 response = call.stdout
+                provider = None  # type: Optional[str]
+                model = None  # type: Optional[str]
                 if command.response_parser is not None:
                     try:
                         response = command.response_parser(response)
@@ -506,11 +515,21 @@ def run_turn(
                                 parsed.detail or str(parsed), body
                             ),
                         ) from None
+                    if isinstance(response, connectors.AttributedText):
+                        # The tool's own structured output named which
+                        # provider and model answered; keep that reported
+                        # identity beside the text instead of discarding it
+                        # after validation.
+                        provider = response.provider
+                        model = response.model
                 if not response.strip():
                     raise BridgeError(
                         Failure.EMPTY_RESPONSE, detail=command.argv[0]
                     )
 
+                format_three = (
+                    record.bridge_format == session_module.FORMAT_3
+                )
                 response_sequence = session_module.next_sequence(session_dir)
                 response_path = session_module.publish(
                     session_module.message_path(
@@ -524,11 +543,10 @@ def run_turn(
                         record.initiator,
                         response,
                         answers=(
-                            request_sequence
-                            if record.bridge_format
-                            == session_module.FORMAT_3
-                            else None
+                            request_sequence if format_three else None
                         ),
+                        model=model if format_three else None,
+                        provider=provider if format_three else None,
                     ),
                 )
     except SignalStop as stopped:
@@ -541,16 +559,19 @@ def run_turn(
         finished_failure(failed)
         raise
 
-    report(
-        {
-            "event": "finished",
-            "phase": "run",
-            "outcome": "success",
-            "request_path": published_request,
-            "response_path": response_path,
-            "warnings": list(turn_warnings),
-        }
-    )
+    finished = {
+        "event": "finished",
+        "phase": "run",
+        "outcome": "success",
+        "request_path": published_request,
+        "response_path": response_path,
+        "warnings": list(turn_warnings),
+    }
+    if model is not None:
+        finished["model"] = model
+    if provider is not None:
+        finished["provider"] = provider
+    report(finished)
     return TurnResult(
         request_sequence=request_sequence,
         response_sequence=response_sequence,
