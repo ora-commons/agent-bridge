@@ -23,9 +23,12 @@ of the session lock, and the taskkill and kill-on-close job twins of
 process-group cleanup, each driven through its Windows branch with the
 platform's own primitive stood in for - including the parent-exits-first case
 where the tree walk has no root to walk from and the job is the only owner
-left standing. Event lines and the terminal response-path line being flushed
-as they are written is checked as well, because a caller watching a pipe sees
-nothing until a flush.
+left standing, and the suspended creation - job assignment before the first
+instruction can run - whose creation flags POSIX would refuse outright, so
+the Windows creator itself is stood in for and what it was asked to create
+with is the assertion. Event lines and the terminal response-path line being
+flushed as they are written is checked as well, because a caller watching a
+pipe sees nothing until a flush.
 
 The lifecycle fixtures are the repository's own fake peer; no real target is
 called here.
@@ -108,13 +111,16 @@ def _await_reported_pids(pid_path, timeout=10.0):
 
 #: A `run_bounded` caller on the simulated Windows branch, in a process of
 #: its own so a check can signal the thing doing the waiting rather than the
-#: check itself. It patches the platform switch and stands in for taskkill
-#: with a function that force-terminates the same tree the real command's
-#: /T walk would reach, and for the kill-on-close job with a release that
-#: terminates the same members the kernel's close would, is stopped from
-#: outside while it waits, and exits 3 when it leaves as the stop it was.
-#: Its arguments are the fake peer's mode and the file the fixture writes its
-#: process ids into.
+#: check itself. It patches the platform switch and stands in for the Windows
+#: creation - whose flags POSIX has no meaning for - with a wrapper that
+#: records what was asked and hands the rest to the ordinary POSIX spawn,
+#: for taskkill with a function that force-terminates the same tree the real
+#: command's /T walk would reach, for the suspended root's resume with a
+#: no-op, and for the kill-on-close job with a release that terminates the
+#: same members the kernel's close would. It is stopped from outside while
+#: it waits, and exits 3 when it leaves as the stop it was. Its arguments
+#: are the fake peer's mode and the file the fixture writes its process ids
+#: into.
 WINDOWS_SIGNAL_DRIVER = (
     "import os, signal, sys\n"
     "sys.path.insert(0, sys.argv[1])\n"
@@ -141,13 +147,21 @@ WINDOWS_SIGNAL_DRIVER = (
     "    return not terminate(tree_pids(pgid))\n"
     "def own_tree(process):\n"
     "    return ('job', process.pid)\n"
+    "def resume_root(process):\n"
+    "    pass\n"
     "def release(job):\n"
     "    terminate(tree_pids(job[1]))\n"
+    "real_popen = peer.subprocess.Popen\n"
+    "def windows_spawn(argv, **kwargs):\n"
+    "    kwargs.pop('creationflags', None)\n"
+    "    return real_popen(argv, **kwargs)\n"
     "peer.WINDOWS = True\n"
     "peer.CLEANUP_GRACE_SECONDS = 0.2\n"
     "peer.ESCALATION_GRACE_SECONDS = 0.5\n"
+    "peer.subprocess.Popen = windows_spawn\n"
     "peer._windows_taskkill = taskkill\n"
     "peer._windows_own_tree = own_tree\n"
+    "peer._windows_resume_root = resume_root\n"
     "peer._windows_release_job = release\n"
     "try:\n"
     "    peer.run_bounded(\n"
@@ -1784,6 +1798,10 @@ class WindowsProcessCleanup(unittest.TestCase):
         stand-in terminates the same set the tree killer would, which is what
         makes it faithful to the one case the correction is about - the root
         already gone and a descendant still running.
+
+        The assignment stand-in also stands in for the suspension discipline
+        when an order list is given: it records itself before the resume, so
+        a check can assert the assignment happened first.
         """
 
         def own_tree(process):
@@ -1802,17 +1820,64 @@ class WindowsProcessCleanup(unittest.TestCase):
 
         return own_tree, release
 
+    def _windows_creation(self, record):
+        """A stand-in for the Windows creation, recording its flags.
+
+        The real creation passes `CREATE_NEW_PROCESS_GROUP` and
+        `CREATE_SUSPENDED` to `CreateProcess`; the POSIX `Popen` has no
+        meaning for creation flags and refuses a nonzero value outright, so
+        the stand-in records exactly what the Windows branch asked to create
+        with and hands the rest to the ordinary POSIX spawn. The record is
+        what the ordering checks assert: the suspended bit is the one that
+        makes assignment-before-resume sufficient on Windows, because a
+        child created with it has not run one instruction of its own.
+        """
+        real_popen = subprocess.Popen
+
+        def windows_spawn(argv, **kwargs):
+            record.append(("spawn", kwargs.get("creationflags", 0)))
+            kwargs.pop("creationflags", None)
+            return real_popen(argv, **kwargs)
+
+        return windows_spawn
+
+    def _resumed_root(self, order=None, pid_path=None):
+        """A stand-in for the suspended root's resume, recording its place.
+
+        The real resume runs the primary thread through `ResumeThread`; the
+        stand-in does nothing but record that the step ran, so a check can
+        assert it ran after the job assignment and - when a fixture pid file
+        is named - that the fixture had still done nothing at that point,
+        because its input is only supplied after this step returns.
+        """
+
+        def resume_root(process):
+            if order is not None:
+                order.append(("resume", process.pid))
+            if pid_path is not None:
+                if os.path.exists(pid_path):
+                    raise AssertionError(
+                        "the fixture had already acted before the resume"
+                    )
+
+        return resume_root
+
     def test_a_windows_timeout_terminates_the_whole_owned_tree(self):
         pid_path = os.path.join(self.temp, "timeout-pids.txt")
         own_tree, release = self._owned_job(pid_path)
+        creation = []
         with mock.patch.object(peer, "WINDOWS", True), mock.patch.object(
             peer, "CLEANUP_GRACE_SECONDS", 0.2
         ), mock.patch.object(
             peer, "ESCALATION_GRACE_SECONDS", 0.5
         ), mock.patch.object(
+            peer.subprocess, "Popen", self._windows_creation(creation)
+        ), mock.patch.object(
             peer, "_windows_taskkill", side_effect=self._tree_killer(pid_path)
         ), mock.patch.object(
             peer, "_windows_own_tree", side_effect=own_tree
+        ), mock.patch.object(
+            peer, "_windows_resume_root", side_effect=self._resumed_root()
         ), mock.patch.object(
             peer, "_windows_release_job", side_effect=release
         ):
@@ -1885,9 +1950,20 @@ class WindowsProcessCleanup(unittest.TestCase):
         exactly that split: this taskkill walks only from a live root and
         kills nothing when the root is gone, so the release is the only
         thing that can reach the orphan, and the run must finish clean.
+
+        The descendant here is the immediate kind: the root starts it as
+        its first action, the shape that escapes an ownership established
+        only after the child is already running. The correction's answer
+        to that shape is asserted directly - the creation carried
+        `CREATE_SUSPENDED` beside the process-group flag, the job was
+        assigned before the resume, and the fixture had still done nothing
+        at the resume - because that is what makes an immediate descendant
+        a member from its creation rather than the first one a race could
+        miss.
         """
         pid_path = os.path.join(self.temp, "orphan-pids.txt")
         order = []
+        creation = []
         own_tree, release = self._owned_job(pid_path, order)
         walk = self._walk_from_root_killer(pid_path)
 
@@ -1896,13 +1972,20 @@ class WindowsProcessCleanup(unittest.TestCase):
             return walk(pgid)
 
         with mock.patch.object(peer, "WINDOWS", True), mock.patch.object(
+            peer, "_CREATE_NEW_PROCESS_GROUP", 0x200
+        ), mock.patch.object(
             peer, "CLEANUP_GRACE_SECONDS", 0.2
         ), mock.patch.object(
             peer, "ESCALATION_GRACE_SECONDS", 0.5
         ), mock.patch.object(
+            peer.subprocess, "Popen", self._windows_creation(creation)
+        ), mock.patch.object(
             peer, "_windows_taskkill", side_effect=taskkill
         ), mock.patch.object(
             peer, "_windows_own_tree", side_effect=own_tree
+        ), mock.patch.object(
+            peer, "_windows_resume_root",
+            side_effect=self._resumed_root(order, pid_path),
         ), mock.patch.object(
             peer, "_windows_release_job", side_effect=release
         ):
@@ -1918,12 +2001,29 @@ class WindowsProcessCleanup(unittest.TestCase):
             )
         pids = _await_reported_pids(pid_path)
         self.assertEqual(completed.returncode, 0)
-        # The job was taken out at spawn and closed before any confirming
-        # walk, which is the order that makes a not-found report an honest
-        # emptiness answer for the descendants the walk never reached.
-        self.assertEqual(order[0], ("own", pids["PEER"]))
-        self.assertEqual(order[1], ("release", pids["PEER"]))
-        self.assertEqual(order[2][0], "taskkill")
+        # The creation asked for the new process group and the suspended
+        # start together: 0x200 beside 0x4, the pair that leaves the child
+        # running nothing until the code above resumes it.
+        self.assertEqual(
+            creation,
+            [("spawn", 0x200 | peer._CREATE_SUSPENDED)],
+            "the Windows creation must start the child suspended",
+        )
+        # The job was assigned to the still-suspended root, the root was
+        # resumed only afterwards - so the descendant the root started with
+        # its first action began inside a job that already owned it - and
+        # the job was closed before any confirming walk, which is the order
+        # that makes a not-found report an honest emptiness answer for the
+        # descendants the walk never reached.
+        self.assertEqual(
+            order,
+            [
+                ("own", pids["PEER"]),
+                ("resume", pids["PEER"]),
+                ("release", pids["PEER"]),
+                ("taskkill", pids["PEER"]),
+            ],
+        )
         self.assertTrue(
             _wait_until_gone(pids["PEER"]),
             "the peer is still there after the Windows cleanup",
@@ -1937,8 +2037,9 @@ class WindowsProcessCleanup(unittest.TestCase):
         """A platform that refuses the kill-on-close job does not get to run.
 
         The refusal is the answer rather than a degraded run: what was just
-        started is terminated at once, while its root is alive and the tree
-        walk can still reach whatever it started, and no cleanup runs
+        started has never run - it was created suspended and the assignment
+        came before the resume - so it is terminated outright, with nothing
+        yet beside it for a tree walk to be needed for, and no cleanup runs
         afterwards because the responsibility has already been taken.
         """
         order = []
@@ -1950,20 +2051,25 @@ class WindowsProcessCleanup(unittest.TestCase):
                 detail="the platform refused the kill-on-close job",
             )
 
+        def end_root(process):
+            order.append(("end", process.pid))
+            process.kill()
+
         def release(job):
             order.append(("release", job))
 
         def taskkill(pgid):
-            try:
-                os.kill(pgid, signal.SIGKILL)
-            except ProcessLookupError:
-                order.append(("taskkill-missing", pgid))
-                return True
-            order.append(("taskkill-terminated", pgid))
+            order.append(("taskkill", pgid))
             return False
 
         with mock.patch.object(peer, "WINDOWS", True), mock.patch.object(
+            peer.subprocess, "Popen", self._windows_creation([])
+        ), mock.patch.object(
             peer, "_windows_own_tree", side_effect=refusing_own_tree
+        ), mock.patch.object(
+            peer, "_windows_resume_root", side_effect=self._resumed_root()
+        ), mock.patch.object(
+            peer, "_windows_end_root", side_effect=end_root
         ), mock.patch.object(
             peer, "_windows_release_job", side_effect=release
         ), mock.patch.object(
@@ -1981,14 +2087,96 @@ class WindowsProcessCleanup(unittest.TestCase):
         self.assertIn(
             "refused the kill-on-close job", caught.exception.detail
         )
-        # The refused run ended the program it had started through the live
-        # root, in that order, and no job was ever released because none was
-        # taken.
+        # The refused run ended what it had started outright - the child
+        # was still suspended, so it had run nothing and there was nothing
+        # beside it to walk - and no job was ever released because none was
+        # taken, and no tree walk or group cleanup ran afterwards because
+        # the responsibility had already been taken.
         root = order[0][1]
         self.assertEqual(
             order,
-            [("own", root), ("taskkill-terminated", root)],
-            "the started program must be terminated while its root is live",
+            [("own", root), ("end", root)],
+            "the never-run program must be terminated outright on refusal",
+        )
+        self.assertTrue(
+            _wait_until_gone(root),
+            "the refused program is still running",
+        )
+
+    def test_a_windows_resume_refusal_releases_the_job_and_ends_the_child(self):
+        """A platform that resumes the suspended root but is refused does
+        not get to run either.
+
+        The job has been taken by then, so the refusal path has more to put
+        back than the assignment refusal: the never-run child is ended
+        outright, the job that was taken is released - which is itself the
+        kernel's termination of every member, none of which can have run -
+        and the refusal is the answer, with no group cleanup afterwards
+        because the responsibility has already been taken.
+        """
+        order = []
+
+        def own_tree(process):
+            order.append(("own", process.pid))
+            return ("job", process.pid)
+
+        def refusing_resume(process):
+            order.append(("resume", process.pid))
+            raise BridgeError(
+                Failure.CLEANUP_FAILURE,
+                detail="the platform refused to resume the suspended root",
+            )
+
+        def end_root(process):
+            order.append(("end", process.pid))
+            process.kill()
+
+        def release(job):
+            order.append(("release", job[1]))
+
+        def taskkill(pgid):
+            order.append(("taskkill", pgid))
+            return False
+
+        with mock.patch.object(peer, "WINDOWS", True), mock.patch.object(
+            peer.subprocess, "Popen", self._windows_creation([])
+        ), mock.patch.object(
+            peer, "_windows_own_tree", side_effect=own_tree
+        ), mock.patch.object(
+            peer, "_windows_resume_root", side_effect=refusing_resume
+        ), mock.patch.object(
+            peer, "_windows_end_root", side_effect=end_root
+        ), mock.patch.object(
+            peer, "_windows_release_job", side_effect=release
+        ), mock.patch.object(
+            peer, "_windows_taskkill", side_effect=taskkill
+        ):
+            with self.assertRaises(BridgeError) as caught:
+                peer.run_bounded(
+                    argv=(sys.executable, FAKE_PEER, "hang"),
+                    cwd=self.temp,
+                    env=tuple(os.environ.items()),
+                    stdin_text="Start something and then stop answering.\n",
+                    deadline=peer.Deadline(30.0),
+                )
+        self.assertEqual(caught.exception.failure, Failure.CLEANUP_FAILURE)
+        self.assertIn(
+            "refused to resume the suspended root", caught.exception.detail
+        )
+        # The job was taken, the resume was refused, the never-run child
+        # was ended outright, and the taken job was released - in that
+        # order - and nothing ran afterwards: no tree walk, no group
+        # cleanup, because the responsibility had already been taken.
+        root = order[0][1]
+        self.assertEqual(
+            order,
+            [
+                ("own", root),
+                ("resume", root),
+                ("end", root),
+                ("release", root),
+            ],
+            "the resume refusal must end the child and release the job",
         )
         self.assertTrue(
             _wait_until_gone(root),
@@ -2027,6 +2215,34 @@ class WindowsProcessCleanup(unittest.TestCase):
             expected_basic + 48 + 4 * pointer,
         )
         self.assertEqual(type(information).IoInfo.offset, expected_basic)
+
+    def test_the_toolhelp_thread_entry_structure_matches_the_api_layout(self):
+        """The ctypes declaration is the layout `Thread32First` and
+        `Thread32Next` fill, measured rather than trusted: seven dword
+        fields and nothing else, so no padding and no platform-dependent
+        part at all. The two fields the resume path reads are where the
+        API puts them.
+        """
+        entry = peer._windows_thread_entry()
+        self.assertEqual(
+            ctypes.sizeof(entry), 28, "THREADENTRY32 is seven dwords"
+        )
+        self.assertEqual(entry.dwSize, 0)
+        names = [name for name, _ in type(entry)._fields_]
+        self.assertEqual(
+            names,
+            [
+                "dwSize",
+                "cntUsage",
+                "th32ThreadID",
+                "th32OwnerProcessID",
+                "tpBasePri",
+                "tpDeltaPri",
+                "dwFlags",
+            ],
+        )
+        self.assertEqual(type(entry).th32ThreadID.offset, 8)
+        self.assertEqual(type(entry).th32OwnerProcessID.offset, 12)
 
     class _WindowsSignals(object):
         """A stand-in for the Windows signal module.
