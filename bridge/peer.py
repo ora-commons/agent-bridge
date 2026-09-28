@@ -27,14 +27,25 @@ because the Unix ones do not exist there. The child is created with
 numbered by its own process id - the direct twin of the new session, and the
 fact the ownership check relies on rather than reads back. The polite signal is
 the console break event that group exists to receive, a courtesy a child may
-ignore and a console-less caller cannot even send. The guarantee therefore
-lives in the forced phase: the operating system's own `taskkill /T /F` on the
-root pid, which terminates the whole descendant tree, reaching even a
-grandchild that put itself into a group of its own. Emptiness is confirmed
-through the same command: a tree it cannot find is gone. The Unix branches
-below are untouched by all of this, and no Windows machine was available to
-exercise the Windows branches live - they are covered by the unit checks with
-the Windows primitives simulated, and that limit is stated rather than hidden.
+ignore and a console-less caller cannot even send. The guarantee lives
+elsewhere, in ownership that does not need the root alive to be exercised:
+the child is placed in a Windows job object configured to kill on close, and
+everything it later starts is a member of that job with no breakaway allowed,
+so the tree stays owned whichever of its processes dies first. Closing this
+code's handle to the job is the forced phase - the kernel terminates every
+member, root or descendant - and the same close is what happens if Agent
+Bridge itself is killed, because the operating system closes a process's
+handles when it ends. The operating system's own `taskkill /T /F` on the root
+pid remains as a belt-and-braces force and as the confirmation, with one
+limit: its tree walk starts at the root, so once the root has exited,
+not-found says nothing about the descendants it would have named.
+Not-found is therefore read as emptiness only after the job has been closed,
+and a platform that refuses the job refuses the turn - what was just started
+is terminated while its root can still be walked, and the refusal is the
+answer rather than a tree nobody owns. The Unix branches below are untouched
+by all of this, and no Windows machine was available to exercise the Windows
+branches live - they are covered by the unit checks with the Windows
+primitives simulated, and that limit is stated rather than hidden.
 
 **What ends the waiting.** Three things can: the program answers, the deadline
 passes, or somebody stops Agent Bridge - with an interrupt from the keyboard, or
@@ -126,8 +137,8 @@ HEARTBEAT_SECONDS = 30.0
 
 #: Whether the process-group twins below run their Windows branches, decided
 #: from the operating system at import time. The unit checks simulate the
-#: Windows branch by patching this and the taskkill twin, because no Windows
-#: machine is part of the qualification.
+#: Windows branch by patching this and the taskkill and job twins, because no
+#: Windows machine is part of the qualification.
 WINDOWS = os.name == "nt"
 
 #: The Windows creation flag that makes the child the leader of a brand-new
@@ -142,17 +153,34 @@ _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 _CTRL_BREAK_EVENT = getattr(signal, "CTRL_BREAK_EVENT", None)
 
 #: The escalation signal, resolved once here rather than named per call,
-#: because Windows CPython defines no `SIGKILL`: naming it inside the Windows
+#: because Windows CPython defines no `SIGKILL`: naming it inside a Windows
 #: branch would raise `AttributeError` before any of that platform's cleanup
-#: could run. Where the attribute does not exist the sentinel resolves to
-#: `None`, the caller passes that same `None` back as the escalation request,
-#: and the forced tree termination is the whole of escalation. On POSIX it is
-#: the real `SIGKILL`, and the branches below behave as they always did.
+#: could run. On POSIX it is the real `SIGKILL` and the escalation below
+#: behaves as it always did; on Windows the sentinel resolves to `None` and
+#: no branch names the attribute, because there is no escalation signal to
+#: send there - the forced phase is the kill-on-close job's release.
 _SIGKILL = getattr(signal, "SIGKILL", None)
 
-#: The exit status `taskkill` reports for a pid it could not find, which is
-#: how emptiness of the owned tree is confirmed on Windows.
+#: The exit status `taskkill` reports for a pid it could not find. Its tree
+#: walk starts at the root, so once the root has exited the report names no
+#: descendant and empties nothing: it is read as the emptiness answer only
+#: where ownership that outlives the root - the kill-on-close job below - has
+#: already been released.
 _TASKKILL_NOT_FOUND = 128
+
+#: The job-object information class of the extended-limits structure, one of
+#: the plain numbers the Windows API passes beside the structure itself.
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+
+#: The one job limit this module sets. The kernel terminates every process in
+#: the job when the last handle to it closes, which turns handle ownership
+#: into tree ownership that survives any member's exit, the root's included.
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+
+#: The process access the job assignment needs: the right to place the
+#: process in a job, and the right the job's own termination uses.
+_PROCESS_SET_QUOTA = 0x0100
+_PROCESS_TERMINATE = 0x0001
 
 
 class Deadline(object):
@@ -363,7 +391,7 @@ class PeerTimeout(BridgeError):
 
 
 def _windows_taskkill(pgid: int) -> bool:
-    """Force the owned process tree to terminate; say whether it was gone.
+    """Force the owned process tree to terminate; say whether it was found.
 
     `taskkill /T` walks the descendant tree from the root pid and `/F`
     terminates every process it names, which is the one reliable way to reach
@@ -371,11 +399,14 @@ def _windows_taskkill(pgid: int) -> bool:
     maps every non-console signal, zero included, to `TerminateProcess` on
     the one named process - so the usual signal-zero emptiness question would
     itself be a kill - and its console events reach only processes sharing
-    this console and are ignored by any child that installed a handler.
-    taskkill's exit status therefore doubles as the emptiness answer: not
-    found means the tree was already gone, success means something was found
-    and has now been terminated, and anything else is a cleanup failure named
-    here.
+    this console and are ignored by any child that installed a handler. But
+    the walk starts at the root: once the root has exited, the not-found
+    report names no descendant and empties nothing. That report is therefore
+    an emptiness answer only through the job - the caller asks after the
+    job's close has terminated every member, and a tree taskkill cannot then
+    find is one the kernel has already emptied. Success means something was
+    found and has now been terminated, and anything else is a cleanup
+    failure named here.
     """
     try:
         completed = subprocess.run(
@@ -411,6 +442,177 @@ def _windows_taskkill(pgid: int) -> bool:
     return False
 
 
+def _windows_kernel32():
+    """kernel32 through ctypes, with the last error kept for the details.
+
+    Resolved per call rather than at import, so the import surface of a POSIX
+    process is exactly what it always was.
+    """
+    import ctypes
+
+    return ctypes.WinDLL("kernel32", use_last_error=True)
+
+
+def _windows_job_information():
+    """The extended-limits structure for one kill-on-close job, freshly built.
+
+    Only the ctypes shapes of the Windows API are declared here, and the one
+    fact that must be right is the byte layout `SetInformationJobObject`
+    expects - which is why the declaration lives in a function any platform
+    can import and the unit checks can measure. Every limit stays zero but
+    the one flag: the kernel terminates the job's processes when the last
+    handle to it closes.
+    """
+    import ctypes
+
+    class io_counters(ctypes.Structure):
+        _fields_ = [
+            (name, ctypes.c_ulonglong)
+            for name in (
+                "ReadOperationCount",
+                "WriteOperationCount",
+                "OtherOperationCount",
+                "ReadTransferCount",
+                "WriteTransferCount",
+                "OtherTransferCount",
+            )
+        ]
+
+    class basic_limits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", ctypes.c_uint32),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", ctypes.c_uint32),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", ctypes.c_uint32),
+            ("SchedulingClass", ctypes.c_uint32),
+        ]
+
+    class extended_limits(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", basic_limits),
+            ("IoInfo", io_counters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    information = extended_limits()
+    information.BasicLimitInformation.LimitFlags = (
+        _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    )
+    return information
+
+
+def _windows_own_tree(process: "subprocess.Popen") -> int:
+    """Place the started child in a kill-on-close job; return the job handle.
+
+    A process handle with exactly the access the assignment needs is opened
+    on the child's own pid - nothing private of the child's is reached for -
+    and the child is assigned to a fresh job with no name and no limits but
+    the one. Everything the child later starts is a member of that job too,
+    because a member's children are members and the job allows no breakaway,
+    so the handle is ownership of a tree that survives the root's own exit:
+    the kernel terminates every member when the last handle closes, whether
+    that close is this code's in cleanup or the operating system's at the
+    end of this process.
+
+    Raises `CLEANUP_FAILURE` naming the step that refused, so the caller can
+    end what it just started while the root is still alive and can still be
+    walked, rather than run a tree nobody owns.
+    """
+    import ctypes
+
+    def refused(step, code):
+        return BridgeError(
+            Failure.CLEANUP_FAILURE,
+            detail=(
+                "{0} refused the kill-on-close job for process {1} "
+                "(error {2}); the turn cannot own what it starts here"
+                .format(step, process.pid, code)
+            ),
+        )
+
+    kernel32 = _windows_kernel32()
+    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+    kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
+    kernel32.SetInformationJobObject.restype = ctypes.c_int
+    kernel32.SetInformationJobObject.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    )
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = (
+        ctypes.c_uint32,
+        ctypes.c_int,
+        ctypes.c_uint32,
+    )
+    kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+    kernel32.AssignProcessToJobObject.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    )
+    kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise refused("CreateJobObjectW", ctypes.get_last_error())
+    information = _windows_job_information()
+    if not kernel32.SetInformationJobObject(
+        job,
+        _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ):
+        kernel32.CloseHandle(job)
+        raise refused("SetInformationJobObject", ctypes.get_last_error())
+    process_handle = kernel32.OpenProcess(
+        _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, process.pid
+    )
+    if not process_handle:
+        kernel32.CloseHandle(job)
+        raise refused("OpenProcess", ctypes.get_last_error())
+    assigned = kernel32.AssignProcessToJobObject(job, process_handle)
+    code = ctypes.get_last_error()
+    kernel32.CloseHandle(process_handle)
+    if not assigned:
+        kernel32.CloseHandle(job)
+        raise refused("AssignProcessToJobObject", code)
+    return job
+
+
+def _windows_release_job(job: int) -> None:
+    """Close the job handle, which is the whole of the forced phase.
+
+    The kernel terminates every member of a kill-on-close job when its last
+    handle closes - this code holds the only one - reaching a descendant
+    that outlived its root exactly as it reaches the root itself. A close
+    that fails is the cleanup failure that gets reported, not something to
+    paper over: a job left open is a tree left standing by nobody's
+    decision.
+    """
+    import ctypes
+
+    kernel32 = _windows_kernel32()
+    kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    if not kernel32.CloseHandle(job):
+        raise BridgeError(
+            Failure.CLEANUP_FAILURE,
+            detail=(
+                "closing the kill-on-close job {0:#x} failed (error {1})"
+                .format(job, ctypes.get_last_error())
+            ),
+        )
+
+
 def _group_gone(pgid: int) -> bool:
     """Is the process group empty? Signal zero asks without disturbing it.
 
@@ -420,9 +622,11 @@ def _group_gone(pgid: int) -> bool:
 
     On Windows there is no signal-zero question to ask - `os.kill` there
     terminates the named process for any non-console signal, zero included -
-    so the emptiness answer comes from the same forced tree termination: a
-    tree taskkill cannot find is gone, and a tree it finds is terminated by
-    the asking, which during cleanup is what the question wanted anyway.
+    so the emptiness answer comes from the forced tree termination, read
+    through the job: the caller asks after the job's close has terminated
+    every member, so a tree taskkill cannot find is one the kernel has
+    already emptied, and a tree it finds is terminated by the asking, which
+    during cleanup is what the question wanted anyway.
     """
     if WINDOWS:
         return _windows_taskkill(pgid)
@@ -448,22 +652,20 @@ def _await_group_gone(pgid: int, grace: float) -> bool:
 
 
 def _signal_group(pgid: int, number: Optional[int]) -> None:
-    """Terminate exactly the group this turn started.
+    """Signal exactly the group this turn started.
 
-    On POSIX that is one signal to the group. On Windows the polite signal is
-    the console break event the group was created to receive - a courtesy a
-    child may ignore and a console-less caller cannot send, so its failure is
-    swallowed and the guarantee lives in the forced phase, where `taskkill
-    /T /F` terminates the whole tree. The escalation arrives as the `_SIGKILL`
-    sentinel rather than a signal Windows CPython could name: there the
-    sentinel is `None`, and comparing against it - instead of reaching for the
-    missing attribute - is what keeps the branch from raising before any
-    cleanup can run. A group that is already gone is left alone, either way.
+    On POSIX that is one signal to the group - the polite termination or the
+    `SIGKILL` escalation - with the escalation named through the `_SIGKILL`
+    sentinel rather than a signal attribute Windows CPython could not
+    define, so no branch reaches for a missing attribute. On Windows there
+    is no escalation signal to send at all: the polite signal is the console
+    break event the group was created to receive - a courtesy a child may
+    ignore and a console-less caller cannot send, so its failure is
+    swallowed - and the guarantee lives in the forced phase, where closing
+    the kill-on-close job makes the kernel terminate every member. A group
+    that is already gone is left alone, either way.
     """
     if WINDOWS:
-        if number == _SIGKILL:
-            _windows_taskkill(pgid)
-            return
         if _CTRL_BREAK_EVENT is not None:
             try:
                 os.kill(pgid, _CTRL_BREAK_EVENT)
@@ -537,23 +739,57 @@ def _own_group(process: "subprocess.Popen") -> int:
     return pgid
 
 
-def _cleanup_group(process: "subprocess.Popen", pgid: int) -> None:
+def _cleanup_group(
+    process: "subprocess.Popen", pgid: int, job: Optional[int] = None
+) -> None:
     """Terminate exactly the group this turn started, and confirm it is empty.
 
     Asks politely first, collects the direct child so a corpse cannot be
-    mistaken for a survivor, and escalates against the same group only. The
-    escalation is the `_SIGKILL` sentinel, not a named attribute, because
-    Windows CPython defines no such signal: there the sentinel is `None` and
-    the forced tree termination is the whole of escalation, while on POSIX the
-    sentinel is the real `SIGKILL` and nothing changes. If anything in the
+    mistaken for a survivor, and escalates against the same group only. On
+    POSIX the escalation is the `_SIGKILL` sentinel, not a named attribute,
+    because Windows CPython defines no such signal; nothing about the POSIX
+    sequence below changes with the Windows addition. If anything in the
     group is still there after the escalation grace, that is
     `CLEANUP_FAILURE`: an unreported survivor would be worse than a visible
     failure.
+
+    On Windows the forced phase is the job handle's close, and the order of
+    the two steps is the correction. taskkill's tree walk starts at the
+    root, so a root that has already exited leaves its not-found report
+    saying nothing about the descendants it would have named - exactly the
+    moment a surviving orphan is on its own - and the kill-on-close job is
+    the owner that is still standing in it. The handle is closed first and
+    the kernel terminates every member for having been in the job; the root
+    is collected again after the close so its corpse cannot be mistaken for
+    a survivor; only then does the not-found report become the emptiness
+    answer. Without a job there is nothing honest to confirm at all -
+    unreachable while a Windows spawn refuses to run without one - so the
+    turn says so instead of guessing.
     """
     if pgid != process.pid:
         raise BridgeError(
             Failure.CLEANUP_FAILURE,
             detail="refusing to signal group {0}".format(pgid),
+        )
+    if WINDOWS:
+        _signal_group(pgid, signal.SIGTERM)
+        _reap(process, CLEANUP_GRACE_SECONDS)
+        if job is None:
+            raise BridgeError(
+                Failure.CLEANUP_FAILURE,
+                detail=(
+                    "the process tree of {0} was never placed in a "
+                    "kill-on-close job, so its descendant cleanup cannot "
+                    "be confirmed".format(pgid)
+                ),
+            )
+        _windows_release_job(job)
+        _reap(process, ESCALATION_GRACE_SECONDS)
+        if _await_group_gone(pgid, ESCALATION_GRACE_SECONDS):
+            return
+        raise BridgeError(
+            Failure.CLEANUP_FAILURE,
+            detail="process tree {0} still has a member".format(pgid),
         )
     _signal_group(pgid, signal.SIGTERM)
     _reap(process, CLEANUP_GRACE_SECONDS)
@@ -585,7 +821,8 @@ def run_bounded(
 
     Raises `PeerTimeout` (a `TIMEOUT`) when the deadline passes first, the given
     `spawn_failure` when the program could not be started at all, and
-    `CLEANUP_FAILURE` when something this turn started outlived it. Raises
+    `CLEANUP_FAILURE` when something this turn started outlived it, or when
+    the platform would not let this turn own what it started. Raises
     `SignalStop` when somebody terminates or hangs up Agent Bridge while the
     program is running. Cleanup runs on every one of those exit paths, and on
     success too.
@@ -599,6 +836,7 @@ def run_bounded(
     stderr = b""
     process = None  # type: Optional[subprocess.Popen]
     pgid = None  # type: Optional[int]
+    job = None  # type: Optional[int]
     # The handlers go on before the child does, and a stop is deferred for the
     # whole life of the child: while it is being started, while its group is
     # being read, and while that group is being emptied. The one window where a
@@ -650,6 +888,24 @@ def run_bounded(
                         )
                     raise BridgeError(spawn_failure, detail=str(exc))
                 pgid = _own_group(process)
+                if WINDOWS:
+                    # Ownership that survives the root's own exit: the
+                    # kill-on-close job holding the child and everything it
+                    # starts. A platform that refuses the job refuses the
+                    # turn - what was just started is terminated and
+                    # collected while its root is alive and can still be
+                    # walked, and the refusal is the answer - because the
+                    # alternative is a tree nobody owns and a not-found
+                    # report mistaken for confirmation. `pgid` is handed
+                    # back so the cleanup below knows the responsibility has
+                    # already been taken.
+                    try:
+                        job = _windows_own_tree(process)
+                    except BridgeError:
+                        _windows_taskkill(pgid)
+                        _reap(process, ESCALATION_GRACE_SECONDS)
+                        pgid = None
+                        raise
                 with watch.allowing():
                     # The wait is one deadline-watched loop rather than one
                     # blocking call, for one reason only: so that a caller who
@@ -689,10 +945,12 @@ def run_bounded(
                     try:
                         # Still deferred, so a second stop cannot abandon this
                         # half done. When the group was never this turn's to
-                        # signal, `_own_group` has already said so and nothing
-                        # here signals anything.
+                        # signal, `_own_group` has already said so - or, on
+                        # Windows, the job-refusal path has already ended
+                        # what it started - and nothing here signals
+                        # anything.
                         if pgid is not None:
-                            _cleanup_group(process, pgid)
+                            _cleanup_group(process, pgid, job)
                     finally:
                         if timed_out:
                             # The group is gone, so the pipes are at end-of-file

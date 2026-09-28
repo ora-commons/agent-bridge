@@ -23,12 +23,16 @@ they are every shape the runner has to tell apart when it decides whether there
 is anything to publish, and both ways a body can travel.
 
 The second is about what a peer leaves behind: a program that exits badly, one
-that will not stop, one that starts a child and then will not stop, and two that
-report their own process id and their child's into a file the check names, so a
-check can watch those exact processes rather than guessing at them. Of those
-last two, one leaves the child in the process group the turn owns and one lets
-it escape into a session of its own, which is the stated limit of what any
-cleanup can reach.
+that will not stop, one that starts a child and then will not stop, and three
+that report their own process id and their child's into a file the check
+names, so a check can watch those exact processes rather than guessing at
+them. Of those last three, one hangs with the child in the process group the
+turn owns, one answers at once and leaves the child alive behind it - the
+parent-exits-first shape, where cleanup arrives to find no root to walk - and
+one lets the child escape into a session of its own, which is the stated
+limit of what any cleanup can reach. The children that may outlive their
+parent sleep a bounded minute, so even a check that failed to end one cannot
+leave it about.
 
 It imports nothing outside the standard library, touches nothing except the
 input it is given, the file it is told to write its process ids into, and the
@@ -57,6 +61,7 @@ MODES = (
     "delay-echo",
     "spawn-child-then-hang",
     "write-pids-then-hang",
+    "write-pids-then-exit",
     "detach-child-then-hang",
 )
 
@@ -97,7 +102,9 @@ def _sleep_bounded(seconds: float) -> None:
         time.sleep(NAP_SECONDS)
 
 
-def _spawn_grandchild(detached: bool = False, seconds: str = "") -> int:
+def _spawn_grandchild(
+    detached: bool = False, seconds: str = "", inherit_output: bool = True
+) -> int:
     """Start one child that sleeps, and say where it was put.
 
     By default there is no new session and no new process group: the grandchild
@@ -109,13 +116,21 @@ def _spawn_grandchild(detached: bool = False, seconds: str = "") -> int:
     group this turn owns. Nothing portable can reach it after that, which is
     the honest limit one check exists to measure. Such a child is given a short
     sleep so that even a check that failed to end it cannot leave it about.
+
+    Unless `inherit_output` is false, the child shares this program's output
+    streams. The one mode that answers and exits while leaving a child alive
+    needs it false: a child holding the output pipes open would keep the
+    caller waiting for an end-of-file its peer already sent.
     """
     argv = [sys.executable, THIS_FILE, "hang"]
     if seconds:
         argv.append(seconds)
+    output = None if inherit_output else subprocess.DEVNULL
     child = subprocess.Popen(
         argv,
         stdin=subprocess.DEVNULL,
+        stdout=output,
+        stderr=output,
         start_new_session=detached,
     )
     return child.pid
@@ -201,10 +216,20 @@ def _run(mode: str, extra: list) -> int:
         _sleep_bounded(MAX_SLEEP_SECONDS)
         return 0
 
-    if mode in ("write-pids-then-hang", "detach-child-then-hang"):
+    if mode in ("write-pids-then-hang", "write-pids-then-exit",
+                "detach-child-then-hang"):
         path = _one_path(mode, extra)
         if not path:
             return 2
+        if mode == "write-pids-then-exit":
+            # The parent-exits-first shape: both process ids are reported,
+            # the child is left alive behind the peer without holding its
+            # output pipes, and the peer answers at once - so a cleanup
+            # arrives to find no root to walk from.
+            _write_pids(
+                path, _spawn_grandchild(seconds="60", inherit_output=False)
+            )
+            return 0
         detached = mode == "detach-child-then-hang"
         _write_pids(
             path,
