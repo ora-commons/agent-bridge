@@ -8,11 +8,13 @@ whether starting it would work at all.
 There are three operations here and nothing else. `check` answers whether Claude
 Code could be used right now. `build_command` composes the one fixed argument
 vector a review turn runs. `build_work_command` composes the normal `--print`
-route a work turn runs. All of them do the same inexpensive prerequisites first
-(the work ones skipping the review-only managed-MCP gate and adding the work
-vector's own switch), because a turn that skipped them would find out about a
-missing sign-in or a renamed switch in the middle of real work, with the peer
-already running.
+route a work turn runs. All of them do the same inexpensive prerequisites first,
+and the work ones skip every review-only gate and fact - the managed-MCP source,
+the endpoint-policy and doctor readings, and the review switch set - proving the
+work vector's own switches instead, because a work turn passes none of the
+review switches and discards both policy readings; a turn that skipped the rest
+would find out about a missing sign-in or a renamed switch in the middle of real
+work, with the peer already running.
 
 **How the answer comes back.** `--print` with no prompt argument reads the
 prompt from standard input, and `--output-format text` puts the final answer,
@@ -63,12 +65,17 @@ where it already lives.
 in the directory its process was started in, so that directory is the mechanism,
 and `--restricted` is what confines the file tools to it.
 
-**What readiness costs.** Nothing. Four cheap questions, no model turn among
-them: where the program is, `claude --version`, `claude auth status --json`, and
-`claude --help`. The sign-in answer is JSON, so it is read rather than guessed
-at: being signed in is required, and how - by subscription rather than by an API
-key - is reported as an observed fact and gates nothing, because choosing
-providers is not this project's business.
+**What readiness costs.** Nothing. Four cheap questions for a review turn, no
+model turn among them: where the program is, `claude --version`, `claude auth
+status --json`, and `claude --help`, with `claude doctor` read once for the
+remote-policy fact. A work-mode check asks three of the four - where the
+program is, the version, and the sign-in - and then proves the work vector's
+own switches from the help, skipping the doctor question and the policy
+readings alike, because the boundary they describe is the review call's and
+work mode discards their answers. The sign-in answer is JSON, so it is read
+rather than guessed at: being signed in is required, and how - by subscription
+rather than by an API key - is reported as an observed fact and gates nothing,
+because choosing providers is not this project's business.
 
 SPDX-License-Identifier: CC0-1.0
 """
@@ -134,11 +141,15 @@ CAPABILITIES = connectors.Capabilities(
     ),
 )
 
-#: The switch beyond the review set that a work turn relies on, verified
-#: against the installed program's own help before any request is published.
-WORK_RESTRICTIONS = (
-    "--add-dir",
-)
+#: The switches a work turn relies on, verified against the installed
+#: program's own help before any request is published: the one-shot route and
+#: the switch that isolates the final answer on standard output. The
+#: review-only restriction set is not a work prerequisite - a work vector
+#: passes none of those switches, so their absence cannot make a work call
+#: unusable - and neither is `--add-dir` unless the session declares an
+#: access directory, because a plain work turn never passes it.
+WORK_RESTRICTIONS = ("--print", "--output-format")
+WORK_ACCESS_RESTRICTIONS = ("--add-dir",)
 
 WORK_WARNING = (
     "Claude Code work runs on its normal route: user, project, and local "
@@ -363,18 +374,23 @@ def _signed_in(status: CompletedCall) -> str:
 
 
 def _prerequisites(
-    deadline: Deadline, cwd: str, work: bool = False
+    deadline: Deadline, cwd: str, work: bool = False, access_paths: Sequence[str] = ()
 ) -> Tuple[str, str, str, str, Tuple[str, ...]]:
     """Everything that has to be true before starting Claude Code is worth doing.
 
-    Six questions in order, each one cheap and none of them a model turn: is
-    the program here, is the exact managed MCP source absent (a review-call
-    requirement only, because the strict-MCP switch that cannot be combined
-    with it is a review switch), is its version one this connector was tested
-    against, is this computer one it was tested on, is somebody signed in, and
-    does the installed version still have every switch the turn relies on -
-    the review set, plus the work set when a work turn is being composed. Any
-    of them failing raises, so nothing further happens.
+    A review turn asks its questions in order, each one cheap and none of them
+    a model turn: is the program here, is the exact managed MCP source absent
+    (a review-call requirement only, because the strict-MCP switch that cannot
+    be combined with it is a review switch), is its version one this connector
+    was tested against, is this computer one it was tested on, is somebody
+    signed in, what does `claude doctor` say about remote managed settings,
+    and does the installed version still have every review switch the vector
+    relies on. A work turn asks the first five and stops there: it proves the
+    work vector's own switches - `--print`, `--output-format`, and `--add-dir`
+    when the session declares an access directory - and asks neither the
+    doctor question nor the endpoint-policy readings, because both describe
+    the review call's boundary and work mode discards their answers. Any
+    failing question raises, so nothing further happens.
 
     Returns the four facts a readiness report needs and a turn uses: where the
     program is, which version answered, how this computer describes itself, and
@@ -390,18 +406,21 @@ def _prerequisites(
         warnings,
     )
     described = connectors.qualified_platform(QUALIFICATION, warnings)
-    endpoint_policy = _endpoint_managed_settings_fact()
 
     account = _signed_in(
         connectors.probe(
             (program, "auth", "status", "--json"), cwd, deadline
         )
     )
-    remote_policy = _remote_managed_settings_fact(program, deadline, cwd)
 
+    remote_policy = None
+    if not work:
+        remote_policy = _remote_managed_settings_fact(program, deadline, cwd)
     help_call = connectors.probe((program, "--help"), cwd, deadline)
-    connectors.qualified_restrictions(help_call, QUALIFICATION)
     if work:
+        switches = WORK_RESTRICTIONS
+        if access_paths:
+            switches += WORK_ACCESS_RESTRICTIONS
         connectors.qualified_restrictions(
             help_call,
             connectors.Qualification(
@@ -410,11 +429,13 @@ def _prerequisites(
                 os_family=QUALIFICATION.os_family,
                 os_major_versions=QUALIFICATION.os_major_versions,
                 architectures=QUALIFICATION.architectures,
-                restrictions=WORK_RESTRICTIONS,
+                restrictions=switches,
             ),
         )
         warnings.append(WORK_WARNING)
     else:
+        endpoint_policy = _endpoint_managed_settings_fact()
+        connectors.qualified_restrictions(help_call, QUALIFICATION)
         warnings.append(
             "Claude Code's --restricted, strict empty MCP, read-only tool, and "
             "planning posture still keeps administrator-managed endpoint and "
@@ -441,7 +462,8 @@ def check(
     are asked somewhere with nothing in it. No real project is touched, nothing
     is installed, nobody is logged in, no model or provider is chosen, and
     nothing is written down for next time. A work-mode check proves the work
-    vector's own switches exist on the installed version.
+    vector's own switches exist on the installed version and asks none of the
+    review-only questions, whose answers work mode discards.
     """
     program, version, described, account, warnings = _prerequisites(
         deadline, cwd, work=(mode == "work")
@@ -509,7 +531,7 @@ def build_work_command(
     its path, so that truth is warned about whenever one is attached.
     """
     program, _version, _described, _account, warnings = _prerequisites(
-        deadline, cwd, work=True
+        deadline, cwd, work=True, access_paths=access_paths
     )
     argv = [program, "--print", "--output-format", "text"]
     for path in access_paths:

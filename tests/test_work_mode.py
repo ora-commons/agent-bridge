@@ -12,6 +12,19 @@ directories, real image bytes reaching a tool, the ordinary-permission work
 vectors of the four connectors that have them, and a failed or stopped call
 retaining its records without inventing success.
 
+The work-mode readiness checks are qualified here against each connector's
+real source: a work check proves the work vector's own switches and never the
+review-only switches, gates nothing on the review call's policy facts, and
+for a target with no work vector performs no switch qualification at all.
+
+Two platform twins are exercised here too, both simulated, because no Windows
+machine is part of this repository's qualification: the `msvcrt.locking` twin
+of the session lock, and the taskkill twin of process-group cleanup, each
+driven through its Windows branch with the platform's own primitive stood in
+for. Event lines and the terminal response-path line being flushed as they
+are written is checked as well, because a caller watching a pipe sees nothing
+until a flush.
+
 The lifecycle fixtures are the repository's own fake peer; no real target is
 called here.
 
@@ -24,9 +37,13 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -40,6 +57,7 @@ from bridge import (  # noqa: E402
     codex,
     connectors,
     hermes,
+    locking,
     minimax,
     peer,
     qwen,
@@ -50,7 +68,83 @@ from bridge import (  # noqa: E402
 )
 from bridge.connectors import PeerCommand  # noqa: E402
 from bridge.errors import BridgeError, Failure  # noqa: E402
+from bridge.peer import CompletedCall  # noqa: E402
 from tests.test_fake_peer import FAKE_PEER  # noqa: E402
+
+#: How the fake peer reports the two processes a cleanup has to end.
+PID_LINE = re.compile(r"^(PEER|CHILD) (\d+)$", re.MULTILINE)
+
+
+def _wait_until_gone(pid, timeout=10.0):
+    """Whether one process ended within the wait, asked of the pid itself."""
+    limit = time.monotonic() + timeout
+    while time.monotonic() < limit:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _await_reported_pids(pid_path, timeout=10.0):
+    """Both process ids the fixture writes, waited for rather than guessed."""
+    limit = time.monotonic() + timeout
+    while time.monotonic() < limit:
+        if os.path.exists(pid_path):
+            with open(pid_path, encoding="utf-8") as stream:
+                found = dict(
+                    (kind, int(number))
+                    for kind, number in PID_LINE.findall(stream.read())
+                )
+            if len(found) == 2:
+                return found
+        time.sleep(0.05)
+    raise AssertionError("the fixture never reported both process ids")
+
+
+#: A `run_bounded` caller on the simulated Windows branch, in a process of
+#: its own so a check can signal the thing doing the waiting rather than the
+#: check itself. It patches the platform switch and stands in for taskkill
+#: with a function that force-terminates the same tree the real command's
+#: /T walk would reach, is stopped from outside while it waits, and exits 3
+#: when it leaves as the stop it was. Its arguments are the fake peer's mode
+#: and the file the fixture writes its process ids into.
+WINDOWS_SIGNAL_DRIVER = (
+    "import os, signal, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "from bridge import peer\n"
+    "pid_file = sys.argv[4]\n"
+    "def taskkill(pgid):\n"
+    "    pids = [pgid]\n"
+    "    with open(pid_file, encoding='utf-8') as stream:\n"
+    "        for line in stream:\n"
+    "            parts = line.split()\n"
+    "            if len(parts) == 2 and parts[0] == 'CHILD':\n"
+    "                pids.append(int(parts[1]))\n"
+    "    found = False\n"
+    "    for pid in pids:\n"
+    "        try:\n"
+    "            os.kill(pid, signal.SIGKILL)\n"
+    "            found = True\n"
+    "        except ProcessLookupError:\n"
+    "            pass\n"
+    "    return not found\n"
+    "peer.WINDOWS = True\n"
+    "peer.CLEANUP_GRACE_SECONDS = 0.2\n"
+    "peer.ESCALATION_GRACE_SECONDS = 0.5\n"
+    "peer._windows_taskkill = taskkill\n"
+    "try:\n"
+    "    peer.run_bounded(\n"
+    "        argv=(sys.executable, sys.argv[2], sys.argv[3], sys.argv[4]),\n"
+    "        cwd=sys.argv[1],\n"
+    "        env=tuple(os.environ.items()),\n"
+    "        stdin_text='Start something and then stop answering.\\n',\n"
+    "        deadline=peer.Deadline(60.0),\n"
+    "    )\n"
+    "except (peer.SignalStop, KeyboardInterrupt):\n"
+    "    sys.exit(3)\n"
+)
 
 
 class WorkModeRecords(unittest.TestCase):
@@ -506,6 +600,76 @@ class WorkTurnBehavior(unittest.TestCase):
             ["0001-initiator-to-peer.md", "0002-initiator-to-peer.md"],
         )
 
+    def test_event_lines_and_the_response_path_line_are_flushed_as_written(self):
+        """A caller watching a pipe sees nothing until a flush.
+
+        Python buffers standard output when it is a pipe, so an unflushed
+        event line would sit in the buffer until the process ended - which
+        for a long turn is the whole turn. Every lifecycle event, and the
+        one response-path line a flag-free run prints, must be pushed out at
+        the moment it is written.
+        """
+
+        class _CountingFlush(io.StringIO):
+            def __init__(self):
+                super().__init__()
+                self.flushes = 0
+
+            def flush(self):
+                self.flushes += 1
+                return super().flush()
+
+        class _EchoWorkConnector:
+            CAPABILITIES = connectors.Capabilities(
+                work="supported",
+                work_detail="fake",
+                image="supported",
+                image_detail="fake",
+            )
+
+            @staticmethod
+            def build_work_command(
+                deadline, cwd, access_paths=(), attachments=(), **kwargs
+            ):
+                return PeerCommand(
+                    argv=(sys.executable, FAKE_PEER, "plain"),
+                    cwd=cwd,
+                    env=tuple(os.environ.items()),
+                )
+
+        with mock.patch.object(
+            runner.connectors, "resolve", return_value=_EchoWorkConnector
+        ):
+            events = _CountingFlush()
+            with mock.patch("sys.stdout", events), mock.patch(
+                "sys.stdin", io.StringIO("Answer me.\n")
+            ):
+                status = cli.main(
+                    ["run", "--session", self.session_dir, "--events-jsonl"]
+                )
+            self.assertEqual(status, 0)
+            kinds = [
+                json.loads(line)["event"]
+                for line in events.getvalue().splitlines()
+            ]
+            self.assertEqual(kinds, ["started", "finished"])
+            self.assertEqual(
+                events.flushes,
+                len(kinds),
+                "each event line must be flushed as it is written",
+            )
+
+            plain = _CountingFlush()
+            with mock.patch("sys.stdout", plain), mock.patch(
+                "sys.stdin", io.StringIO("Answer again.\n")
+            ):
+                status = cli.main(["run", "--session", self.session_dir])
+            self.assertEqual(status, 0)
+            self.assertTrue(
+                plain.getvalue().strip().endswith("0004-peer-to-initiator.md")
+            )
+            self.assertEqual(plain.flushes, 1)
+
     def _read(self, path):
         with open(path, encoding="utf-8") as stream:
             return stream.read()
@@ -914,6 +1078,834 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
             review = codex.build_command(peer.Deadline(60.0), self.temp)
         self.assertIn("read-only", review.argv)
         self.assertIn("--ignore-user-config", review.argv)
+
+
+class WorkModeCheckQualifications(unittest.TestCase):
+    """A work-mode check qualifies the work vector, never the review vector.
+
+    Each check below drives one connector's real prerequisite code with a
+    probe stand-in. The help text the stand-in returns names only the work
+    vector's own switches - a program that had dropped every review-only
+    switch - and the work-mode check must succeed on it, while the review
+    check on the same program must still refuse. Authentication and the
+    executable, version, and platform facts stay prerequisites in both modes.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.mkdtemp(prefix="agent-bridge-work-checks-")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    @staticmethod
+    def _probed(fake, recording):
+        def probe(argv, cwd, deadline, env=None):
+            argv = tuple(argv)
+            recording.append(argv)
+            return fake(argv)
+
+        return probe
+
+    def test_claude_work_check_skips_the_review_gates_and_policy_facts(self):
+        auth = (
+            '{"loggedIn": true, "authMethod": "claude.ai", '
+            '"apiProvider": "firstParty"}'
+        )
+        work_help = (
+            "Usage: claude\n  -p, --print\n  --output-format <format>\n"
+            "  --add-dir <directories...>\n"
+        )
+        probed = []
+
+        def fake(argv):
+            if argv[-1] == "--version":
+                return CompletedCall(0, "claude 2.1.251\n", "")
+            if argv[-1] == "--json":
+                return CompletedCall(0, auth, "")
+            return CompletedCall(0, work_help, "")
+
+        with mock.patch.object(
+            claude.connectors, "executable", return_value="/fake/claude"
+        ), mock.patch.object(
+            claude.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            claude.connectors, "probe", side_effect=self._probed(fake, probed)
+        ):
+            checked = claude.check(peer.Deadline(30.0), self.temp, mode="work")
+            command = claude.build_work_command(peer.Deadline(60.0), self.temp)
+
+        # No doctor question and no policy fact: the boundary they describe
+        # is the review call's, and work mode discards both readings.
+        self.assertEqual(
+            probed[:3],
+            [
+                ("/fake/claude", "--version"),
+                ("/fake/claude", "auth", "status", "--json"),
+                ("/fake/claude", "--help"),
+            ],
+        )
+        self.assertNotIn("/fake/claude doctor", " ".join(map(" ".join, probed)))
+        self.assertEqual(checked.warnings, (claude.WORK_WARNING,))
+        self.assertEqual(
+            command.argv, ("/fake/claude", "--print", "--output-format", "text")
+        )
+
+        # The help names no review switch, and the review check refuses it.
+        with mock.patch.object(
+            claude.connectors, "executable", return_value="/fake/claude"
+        ), mock.patch.object(
+            claude.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            claude.connectors, "probe", side_effect=self._probed(fake, [])
+        ):
+            with self.assertRaises(BridgeError) as caught:
+                claude.check(peer.Deadline(30.0), self.temp)
+        self.assertEqual(caught.exception.failure, Failure.RESTRICTIONS_UNAVAILABLE)
+
+        # --add-dir is a prerequisite only when an access directory exists.
+        no_add_dir = work_help.replace("  --add-dir <directories...>\n", "")
+
+        def fake_without(argv):
+            if argv[-1] == "--version":
+                return CompletedCall(0, "claude 2.1.251\n", "")
+            if argv[-1] == "--json":
+                return CompletedCall(0, auth, "")
+            return CompletedCall(0, no_add_dir, "")
+
+        with mock.patch.object(
+            claude.connectors, "executable", return_value="/fake/claude"
+        ), mock.patch.object(
+            claude.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            claude.connectors, "probe", side_effect=self._probed(fake_without, [])
+        ):
+            claude.build_work_command(peer.Deadline(60.0), self.temp)
+            with self.assertRaises(BridgeError) as caught:
+                claude.build_work_command(
+                    peer.Deadline(60.0), self.temp, access_paths=("/access/docs",)
+                )
+        self.assertEqual(caught.exception.failure, Failure.RESTRICTIONS_UNAVAILABLE)
+
+    def test_codex_work_check_qualifies_the_work_switches_only(self):
+        work_help = (
+            "Usage: codex exec\n  --skip-git-repo-check\n  --cd <DIR>\n"
+        )
+        probed = []
+
+        def fake(argv):
+            if argv[-1] == "--version":
+                return CompletedCall(0, "codex-cli 0.147.0\n", "")
+            if tuple(argv)[1:] == ("login", "status"):
+                return CompletedCall(0, "", "Logged in using ChatGPT")
+            return CompletedCall(0, work_help, "")
+
+        with mock.patch.object(
+            codex.connectors, "executable", return_value="/fake/codex"
+        ), mock.patch.object(
+            codex.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            codex.connectors, "probe", side_effect=self._probed(fake, probed)
+        ), mock.patch.dict(os.environ, {"CODEX_HOME": self.temp}):
+            checked = codex.check(peer.Deadline(30.0), self.temp, mode="work")
+            codex.build_work_command(peer.Deadline(60.0), self.temp)
+
+        # The exec subcommand is proved by the help probe that carries the
+        # switches; the login status is still a prerequisite; the help names
+        # no review-only switch and the work check proceeds on it.
+        self.assertEqual(
+            probed[:3],
+            [
+                ("/fake/codex", "--version"),
+                ("/fake/codex", "login", "status"),
+                ("/fake/codex", "exec", "--help"),
+            ],
+        )
+        self.assertEqual(len(checked.warnings), 1)
+        self.assertIn("apparent", checked.warnings[0])
+
+        with mock.patch.object(
+            codex.connectors, "executable", return_value="/fake/codex"
+        ), mock.patch.object(
+            codex.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            codex.connectors, "probe", side_effect=self._probed(fake, [])
+        ):
+            with self.assertRaises(BridgeError) as caught:
+                codex.check(peer.Deadline(30.0), self.temp)
+        self.assertEqual(caught.exception.failure, Failure.RESTRICTIONS_UNAVAILABLE)
+
+        # A refused sign-in still stops a work turn before anything starts.
+        def signed_out(argv):
+            if argv[-1] == "--version":
+                return CompletedCall(0, "codex-cli 0.147.0\n", "")
+            return CompletedCall(1, "", "not logged in")
+
+        with mock.patch.object(
+            codex.connectors, "executable", return_value="/fake/codex"
+        ), mock.patch.object(
+            codex.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            codex.connectors, "probe", side_effect=self._probed(signed_out, [])
+        ):
+            with self.assertRaises(BridgeError) as caught:
+                codex.check(peer.Deadline(30.0), self.temp, mode="work")
+        self.assertEqual(caught.exception.failure, Failure.AUTHENTICATION_REQUIRED)
+
+        # --add-dir and --image are prerequisites only when they travel.
+        def fake_without(argv):
+            if argv[-1] == "--version":
+                return CompletedCall(0, "codex-cli 0.147.0\n", "")
+            if tuple(argv)[1:] == ("login", "status"):
+                return CompletedCall(0, "", "Logged in using ChatGPT")
+            return CompletedCall(0, work_help, "")
+
+        with mock.patch.object(
+            codex.connectors, "executable", return_value="/fake/codex"
+        ), mock.patch.object(
+            codex.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            codex.connectors, "probe",
+            side_effect=self._probed(fake_without, []),
+        ), mock.patch.dict(os.environ, {"CODEX_HOME": self.temp}):
+            codex.build_work_command(peer.Deadline(60.0), self.temp)
+            for requested in ({"access_paths": ("/access",)},
+                              {"attachments": ("/img/a.png",)}):
+                with self.subTest(requested=sorted(requested)):
+                    with self.assertRaises(BridgeError) as caught:
+                        codex.build_work_command(
+                            peer.Deadline(60.0), self.temp, **requested
+                        )
+                    self.assertEqual(
+                        caught.exception.failure,
+                        Failure.RESTRICTIONS_UNAVAILABLE,
+                    )
+
+    def test_minimax_work_check_requires_no_review_permission_switch(self):
+        work_help = (
+            "Usage: mcode exec\n  --input <text>\n  --input-format <format>\n"
+            "  --cwd <dir>\n  --output-format <format>\n  --timeout <ms>\n"
+            "  --file <path>\n  --max-steps <n>\n"
+        )
+        probed = []
+
+        def fake(argv):
+            if argv[-1] == "--version":
+                return CompletedCall(0, "mcode 0.2.7\n", "")
+            return CompletedCall(0, work_help, "")
+
+        with mock.patch.object(
+            minimax.connectors, "executable", return_value="/fake/mcode"
+        ), mock.patch.object(
+            minimax.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            minimax.connectors, "probe", side_effect=self._probed(fake, probed)
+        ):
+            checked = minimax.check(peer.Deadline(30.0), self.temp, mode="work")
+            command = minimax.build_work_command(
+                peer.Deadline(30.0), self.temp, attachments=("/img/a.png",)
+            )
+
+        # Two probes only, no provider probe: authentication stays honestly
+        # unconfirmed, and the help names no --permission switch.
+        self.assertEqual(
+            probed[:2],
+            [("/fake/mcode", "--version"), ("/fake/mcode", "exec", "--help")],
+        )
+        self.assertTrue(
+            all("provider" not in " ".join(call) for call in probed)
+        )
+        self.assertIn(minimax.WORK_WARNING, checked.warnings)
+        self.assertTrue(
+            any("unconfirmed" in warning for warning in checked.warnings)
+        )
+        self.assertIn(("--file", "/img/a.png"), tuple(zip(command.argv, command.argv[1:])))
+
+        # The review check still requires the review set, --permission
+        # included, from the same switchless help.
+        with mock.patch.object(
+            minimax.connectors, "executable", return_value="/fake/mcode"
+        ), mock.patch.object(
+            minimax.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            minimax.connectors, "probe", side_effect=self._probed(fake, [])
+        ):
+            with self.assertRaises(BridgeError) as caught:
+                minimax.check(peer.Deadline(30.0), self.temp)
+        self.assertEqual(caught.exception.failure, Failure.RESTRICTIONS_UNAVAILABLE)
+
+        # The optional switches are prerequisites only when the vector
+        # emits them; the native timeout stops being one when the deadline
+        # is past what the program's own timer domain accepts.
+        optional_free = work_help.replace("  --file <path>\n", "").replace(
+            "  --max-steps <n>\n", ""
+        )
+
+        def fake_without(argv):
+            if argv[-1] == "--version":
+                return CompletedCall(0, "mcode 0.2.7\n", "")
+            return CompletedCall(0, optional_free, "")
+
+        with mock.patch.object(
+            minimax.connectors, "executable", return_value="/fake/mcode"
+        ), mock.patch.object(
+            minimax.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            minimax.connectors, "probe", side_effect=self._probed(fake_without, [])
+        ):
+            minimax.build_work_command(peer.Deadline(30.0), self.temp)
+            for requested in ({"attachments": ("/img/a.png",)},
+                              {"max_steps": 4}):
+                with self.subTest(requested=sorted(requested)):
+                    with self.assertRaises(BridgeError) as caught:
+                        minimax.build_work_command(
+                            peer.Deadline(30.0), self.temp, **requested
+                        )
+                    self.assertEqual(
+                        caught.exception.failure,
+                        Failure.RESTRICTIONS_UNAVAILABLE,
+                    )
+
+            no_timeout = optional_free.replace("  --timeout <ms>\n", "")
+
+            def fake_untimed(argv):
+                if argv[-1] == "--version":
+                    return CompletedCall(0, "mcode 0.2.7\n", "")
+                return CompletedCall(0, no_timeout, "")
+
+            with mock.patch.object(
+                minimax.connectors, "probe",
+                side_effect=self._probed(fake_untimed, []),
+            ):
+                astronomical = minimax.build_work_command(
+                    peer.Deadline(1e308), self.temp
+                )
+            self.assertNotIn("--timeout", astronomical.argv)
+
+    def test_zcode_work_check_drops_the_review_deny_list_requirement(self):
+        help_text = (
+            "  -p, --prompt <text>\n  --mode <mode>\n  --cwd <path>\n"
+            "  --attach <path>\n  --disallowed-tools <tools...>\n"
+        )
+        probed = []
+
+        def fake(argv):
+            if argv[2] == "--version":
+                return CompletedCall(0, "zcode 0.16.5\n", "")
+            if argv[2] == "plugins":
+                return CompletedCall(0, "[]", "")
+            if argv[2] == "version":
+                return CompletedCall(0, "zcode 0.16.5\n", "")
+            return CompletedCall(0, help_text, "")
+
+        with mock.patch.object(
+            zcode, "_program", return_value=("/fake/node", "/fake/zcode.cjs")
+        ), mock.patch.object(
+            zcode.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            zcode, "_sign_in_facts", return_value="sign-in observed"
+        ), mock.patch.object(
+            zcode.connectors, "probe", side_effect=self._probed(fake, probed)
+        ):
+            checked = zcode.check(peer.Deadline(30.0), self.temp, mode="work")
+            command = zcode.build_work_command(peer.Deadline(60.0), self.temp)
+
+        # The no-model parser check passes the work switches and no
+        # --disallowed-tools, because the work vector never carries one.
+        parser_probes = [call for call in probed if call[2] == "version"]
+        self.assertEqual(len(parser_probes), 2)
+        for parser_probe in parser_probes:
+            self.assertEqual(
+                parser_probe,
+                (
+                    "/fake/node", "/fake/zcode.cjs", "version",
+                    "--mode", "edit", "--cwd", self.temp,
+                    "--output-format", "text",
+                ),
+            )
+        self.assertIn(zcode.WORK_WARNING, checked.warnings)
+        self.assertEqual(
+            command.argv,
+            (
+                "/fake/node", "/fake/zcode.cjs",
+                "--mode", "edit", "--cwd", self.temp,
+                "--output-format", "text",
+            ),
+        )
+
+        # A help text without the review deny-list switch serves a work turn
+        # and refuses a review one; the review parser check still carries
+        # the deny switch the review vector passes.
+        no_deny_list = help_text.replace(
+            "  --disallowed-tools <tools...>\n", ""
+        )
+
+        def fake_without(argv):
+            if argv[2] == "--version":
+                return CompletedCall(0, "zcode 0.16.5\n", "")
+            if argv[2] == "plugins":
+                return CompletedCall(0, "[]", "")
+            if argv[2] == "version":
+                return CompletedCall(0, "zcode 0.16.5\n", "")
+            return CompletedCall(0, no_deny_list, "")
+
+        with mock.patch.object(
+            zcode, "_program", return_value=("/fake/node", "/fake/zcode.cjs")
+        ), mock.patch.object(
+            zcode.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            zcode, "_sign_in_facts", return_value="sign-in observed"
+        ), mock.patch.object(
+            zcode.connectors, "probe", side_effect=self._probed(fake_without, [])
+        ):
+            zcode.check(peer.Deadline(30.0), self.temp, mode="work")
+            with self.assertRaises(BridgeError) as caught:
+                zcode.check(peer.Deadline(30.0), self.temp)
+        self.assertEqual(caught.exception.failure, Failure.RESTRICTIONS_UNAVAILABLE)
+
+        review_probes = []
+        with mock.patch.object(
+            zcode, "_program", return_value=("/fake/node", "/fake/zcode.cjs")
+        ), mock.patch.object(
+            zcode.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            zcode, "_sign_in_facts", return_value="sign-in observed"
+        ), mock.patch.object(
+            zcode.connectors, "probe",
+            side_effect=self._probed(fake, review_probes),
+        ):
+            zcode.check(peer.Deadline(30.0), self.temp)
+        self.assertEqual(
+            [call for call in review_probes if call[2] == "version"],
+            [
+                (
+                    "/fake/node", "/fake/zcode.cjs", "version",
+                    "--disallowed-tools", "Edit", "--mode", "plan",
+                    "--cwd", self.temp, "--output-format", "text",
+                )
+            ],
+        )
+
+        # --attach is a prerequisite only when an attachment travels.
+        no_attach = help_text.replace("  --attach <path>\n", "")
+
+        def fake_unattached(argv):
+            if argv[2] == "--version":
+                return CompletedCall(0, "zcode 0.16.5\n", "")
+            if argv[2] == "plugins":
+                return CompletedCall(0, "[]", "")
+            if argv[2] == "version":
+                return CompletedCall(0, "zcode 0.16.5\n", "")
+            return CompletedCall(0, no_attach, "")
+
+        with mock.patch.object(
+            zcode, "_program", return_value=("/fake/node", "/fake/zcode.cjs")
+        ), mock.patch.object(
+            zcode.connectors, "qualified_platform",
+            return_value="Darwin 26 arm64",
+        ), mock.patch.object(
+            zcode, "_sign_in_facts", return_value="sign-in observed"
+        ), mock.patch.object(
+            zcode.connectors, "probe",
+            side_effect=self._probed(fake_unattached, []),
+        ):
+            zcode.build_work_command(peer.Deadline(60.0), self.temp)
+            with self.assertRaises(BridgeError) as caught:
+                zcode.build_work_command(
+                    peer.Deadline(60.0), self.temp, attachments=("/img/a.png",)
+                )
+        self.assertEqual(caught.exception.failure, Failure.RESTRICTIONS_UNAVAILABLE)
+
+    def test_unsupported_work_needs_no_switch_qualification(self):
+        """Hermes and Qwen: work is reported unsupported from source-grounded
+        reasons, and no review switch is a prerequisite of that report."""
+        for connector, peer_id in ((hermes, "hermes"), (qwen, "qwen")):
+            with self.subTest(peer=peer_id):
+                probed = []
+
+                def fake(argv):
+                    argv = tuple(argv)
+                    if argv[-1] == "--version":
+                        version = {
+                            "hermes": "hermes 0.18.2\n",
+                            "qwen": "qwen 0.23.0\n",
+                        }[peer_id]
+                        return CompletedCall(0, version, "")
+                    if peer_id == "hermes":
+                        return CompletedCall(
+                            0,
+                            "logged in\nusing Nous as inference provider\n",
+                            "",
+                        )
+                    return CompletedCall(0, "", "")
+
+                with mock.patch.object(
+                    connector.connectors, "executable",
+                    return_value="/fake/{0}".format(peer_id),
+                ), mock.patch.object(
+                    connector.connectors, "qualified_platform",
+                    return_value="Darwin 26 arm64",
+                ), mock.patch.object(
+                    connector.connectors, "probe",
+                    side_effect=self._probed(fake, probed),
+                ):
+                    checked = connector.check(
+                        peer.Deadline(30.0), self.temp, mode="work"
+                    )
+                    # The work-mode check asked its version and
+                    # authentication questions and no switch question at
+                    # all; its sentence claims no switch verification
+                    # nobody performed.
+                    expected = [("/fake/{0}".format(peer_id), "--version")]
+                    if peer_id == "hermes":
+                        expected.append(("/fake/hermes", "portal", "info"))
+                    self.assertEqual(probed, expected)
+                    self.assertIn("{0} ".format(peer_id), checked.message)
+                    self.assertNotIn("fixed-vector switch", checked.message)
+
+                    # The same switchless program still fails a review
+                    # check, which alone qualifies the review switches.
+                    with self.assertRaises(BridgeError) as caught:
+                        connector.check(peer.Deadline(30.0), self.temp)
+                self.assertEqual(
+                    caught.exception.failure, Failure.RESTRICTIONS_UNAVAILABLE
+                )
+                self.assertEqual(
+                    probed[-1], ("/fake/{0}".format(peer_id), "--help")
+                )
+
+
+class WindowsLockingTwins(unittest.TestCase):
+    """The msvcrt lock twin: the same one-holder contract, simulated.
+
+    No Windows machine is part of this repository's qualification, so the
+    Windows branch of the session lock is driven by standing in for the
+    `msvcrt` module itself, with the lock file, the descriptors, and the
+    contention all real. The POSIX twin is checked on this platform directly,
+    and the cross-process flock behavior it keeps is covered by the
+    compatibility selection's own contention checks.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.mkdtemp(prefix="agent-bridge-work-winlock-")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    class _FakeMsvcrt(object):
+        """A stand-in for the Windows lock module.
+
+        The real `msvcrt.locking` refuses a second `LK_NBLCK` on the same
+        byte range and refuses to unlock a range the caller does not hold;
+        the stand-in does both, keyed on the file the descriptor names, and
+        records every call's mode, length, and the position it was made at.
+        """
+
+        LK_NBLCK = 2
+        LK_UNLCK = 0
+
+        def __init__(self):
+            self.locked = set()
+            self.calls = []
+
+        def locking(self, fd, mode, nbytes):
+            status = os.fstat(fd)
+            key = (status.st_dev, status.st_ino)
+            self.calls.append(
+                (fd, mode, nbytes, os.lseek(fd, 0, os.SEEK_CUR))
+            )
+            if mode == self.LK_NBLCK:
+                if key in self.locked:
+                    raise OSError(13, "Permission denied")
+                self.locked.add(key)
+            elif mode == self.LK_UNLCK:
+                if key not in self.locked:
+                    raise OSError(22, "unlock of an unheld region")
+                self.locked.discard(key)
+
+    def test_the_windows_twin_locks_unlocks_and_refuses_a_second_holder(self):
+        fake = self._FakeMsvcrt()
+        with mock.patch.object(locking, "msvcrt", fake):
+            with locking.session_lock(self.temp) as path:
+                self.assertEqual(path, locking.lock_path(self.temp))
+                self.assertEqual(len(fake.locked), 1)
+                # A second acquirer is refused at once, and nothing is ever
+                # written into the lock file.
+                with self.assertRaises(BridgeError) as caught:
+                    with locking.session_lock(self.temp):
+                        self.fail("the lock was granted twice")
+                self.assertEqual(caught.exception.failure, Failure.BUSY_SESSION)
+                with open(path, "rb") as stream:
+                    self.assertEqual(stream.read(), b"")
+            # The holder's exit gives the lock back.
+            self.assertEqual(fake.locked, set())
+
+        # Every call locked or unlocked one byte, at the start of the file:
+        # the take, the refused second take, the refused second take's stray
+        # release, and the holder's release.
+        self.assertEqual(
+            [(mode, nbytes, position) for _fd, mode, nbytes, position in fake.calls],
+            [
+                (fake.LK_NBLCK, 1, 0),
+                (fake.LK_NBLCK, 1, 0),
+                (fake.LK_UNLCK, 1, 0),
+                (fake.LK_UNLCK, 1, 0),
+            ],
+        )
+
+    def test_the_posix_twin_is_flock_and_its_release_is_the_close(self):
+        with mock.patch.object(locking, "msvcrt", None):
+            handle = os.open(
+                locking.lock_path(self.temp), os.O_RDWR | os.O_CREAT, 0o600
+            )
+            second = os.open(locking.lock_path(self.temp), os.O_RDWR)
+            try:
+                # Closing the descriptor has always been the release on
+                # POSIX, so the release twin does nothing there.
+                self.assertIsNone(locking._release(handle))
+                locking._acquire(handle)
+                with self.assertRaises(OSError):
+                    locking._acquire(second)
+            finally:
+                os.close(handle)
+                os.close(second)
+
+
+class WindowsProcessCleanup(unittest.TestCase):
+    """The taskkill cleanup branch, simulated: the owned tree ends with the turn.
+
+    No Windows machine is part of this repository's qualification, so the
+    Windows branch of process cleanup is driven by patching the platform
+    switch and standing in for `taskkill /T /F` with a function that
+    force-terminates the same processes the real command's own tree walk
+    would reach. Everything else in each check is real: the spawn, the
+    deadline, the signal delivery, the reaping, and the processes that must
+    be gone afterwards. The Unix branch of the same cleanup is the
+    compatibility selection's own orphan and stop checks.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.mkdtemp(prefix="agent-bridge-work-winclean-")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    def _tree_killer(self, pid_path):
+        """A stand-in for `taskkill /T /F` on one root pid.
+
+        The real command walks the descendant tree and force-terminates each
+        process it names; the stand-in terminates the root and the descendant
+        the fixture reported, which is the same set, and answers the
+        emptiness question the same way: nothing found means already gone.
+        """
+
+        def taskkill(pgid):
+            pids = [pgid]
+            with open(pid_path, encoding="utf-8") as stream:
+                for kind, number in PID_LINE.findall(stream.read()):
+                    if kind == "CHILD":
+                        pids.append(int(number))
+            found = False
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    found = True
+                except ProcessLookupError:
+                    pass
+            return not found
+
+        return taskkill
+
+    def test_a_windows_timeout_terminates_the_whole_owned_tree(self):
+        pid_path = os.path.join(self.temp, "timeout-pids.txt")
+        with mock.patch.object(peer, "WINDOWS", True), mock.patch.object(
+            peer, "CLEANUP_GRACE_SECONDS", 0.2
+        ), mock.patch.object(
+            peer, "ESCALATION_GRACE_SECONDS", 0.5
+        ), mock.patch.object(
+            peer, "_windows_taskkill", side_effect=self._tree_killer(pid_path)
+        ):
+            with self.assertRaises(peer.PeerTimeout) as caught:
+                peer.run_bounded(
+                    argv=(
+                        sys.executable, FAKE_PEER,
+                        "write-pids-then-hang", pid_path,
+                    ),
+                    cwd=self.temp,
+                    env=tuple(os.environ.items()),
+                    stdin_text="Start something and then stop answering.\n",
+                    deadline=peer.Deadline(0.8),
+                )
+        pids = _await_reported_pids(pid_path)
+        self.assertEqual(caught.exception.pid, pids["PEER"])
+        self.assertTrue(
+            _wait_until_gone(pids["PEER"]),
+            "the peer is still there after the Windows cleanup",
+        )
+        self.assertTrue(
+            _wait_until_gone(pids["CHILD"]),
+            "the process the peer started is still there",
+        )
+
+    def test_a_windows_stop_terminates_the_whole_owned_tree(self):
+        pid_path = os.path.join(self.temp, "stop-pids.txt")
+        driver = subprocess.Popen(
+            (
+                sys.executable, "-c", WINDOWS_SIGNAL_DRIVER,
+                REPO_ROOT, FAKE_PEER, "write-pids-then-hang", pid_path,
+            ),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        def end_driver():
+            driver.stdin.close()
+            if driver.poll() is None:
+                driver.kill()
+            driver.wait(timeout=10.0)
+            driver.stdout.close()
+            driver.stderr.close()
+
+        self.addCleanup(end_driver)
+        pids = _await_reported_pids(pid_path)
+
+        os.kill(driver.pid, signal.SIGTERM)
+        driver.wait(timeout=10.0)
+        self.assertEqual(driver.returncode, 3, driver.stderr.read())
+        self.assertTrue(
+            _wait_until_gone(pids["PEER"]),
+            "the peer is still there after the Windows stop",
+        )
+        self.assertTrue(
+            _wait_until_gone(pids["CHILD"]),
+            "the process the peer started is still there after the stop",
+        )
+
+    class _WindowsSignals(object):
+        """A stand-in for the Windows signal module.
+
+        Windows CPython defines no `SIGKILL`, so neither does the stand-in:
+        any code on the Windows path that names `signal.SIGKILL` fails the
+        check below exactly the way it would fail on Windows itself, with an
+        `AttributeError` raised before any cleanup could run. The signals
+        that platform really defines and the Windows branches read are kept,
+        with their real Windows values.
+        """
+
+        SIGINT = 2
+        SIGTERM = 15
+        CTRL_C_EVENT = 0
+        CTRL_BREAK_EVENT = 1
+
+    def test_the_windows_cleanup_never_names_a_signal_windows_does_not_have(self):
+        """The whole Windows cleanup runs against a signal module without
+        SIGKILL, so a missing attribute is a failure here rather than one
+        discovered only on a Windows machine nobody has.
+
+        The escalation sentinel is re-resolved from the stand-in exactly as
+        the module resolves it at import, the escalation phase is reached by
+        making the polite one insufficient, and every platform primitive the
+        branch touches is stood in for, so the check is about the one thing
+        that broke: the resolved values, and a code path that never reaches
+        for an attribute the platform's own signal module does not define.
+        """
+        windows = self._WindowsSignals()
+        resolved = getattr(windows, "SIGKILL", None)
+        self.assertIsNone(
+            resolved,
+            "the escalation sentinel must resolve to None on a signal "
+            "module without SIGKILL",
+        )
+        process = mock.Mock(pid=4321)
+        kills = []
+        taskkills = []
+
+        def fake_kill(pid, number):
+            kills.append((pid, number))
+
+        def fake_taskkill(pgid):
+            taskkills.append(pgid)
+            return True
+
+        with mock.patch.object(peer, "WINDOWS", True), mock.patch.object(
+            peer, "signal", windows
+        ), mock.patch.object(
+            peer, "_SIGKILL", resolved
+        ), mock.patch.object(
+            peer, "_CTRL_BREAK_EVENT", windows.CTRL_BREAK_EVENT
+        ), mock.patch.object(
+            peer.os, "kill", side_effect=fake_kill
+        ), mock.patch.object(
+            peer, "_windows_taskkill", side_effect=fake_taskkill
+        ), mock.patch.object(
+            peer, "_reap", lambda waited, grace: None
+        ), mock.patch.object(
+            peer, "_await_group_gone", side_effect=[False, True]
+        ):
+            # Reaching the end at all is the first assertion: naming
+            # signal.SIGKILL anywhere on this path raises AttributeError
+            # against the stand-in, as it would against the real module.
+            peer._cleanup_group(process, 4321)
+
+        # The polite phase was the console break alone and the escalation was
+        # taskkill alone: no signal Windows does not have was named, sent, or
+        # needed to empty the owned tree.
+        self.assertEqual(
+            kills, [(4321, windows.CTRL_BREAK_EVENT)]
+        )
+        self.assertEqual(taskkills, [4321])
+
+    def test_taskkill_is_one_fixed_vector_with_three_honest_answers(self):
+        run = mock.Mock(
+            return_value=subprocess.CompletedProcess((), 0, b"", b"SUCCESS")
+        )
+        with mock.patch.object(peer.subprocess, "run", run):
+            self.assertFalse(
+                peer._windows_taskkill(4321),
+                "a terminated tree is not an already-empty one",
+            )
+        self.assertEqual(
+            run.call_args[0][0], ("taskkill", "/T", "/F", "/PID", "4321")
+        )
+
+        with mock.patch.object(
+            peer.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                (), 128, b"", b'ERROR: The process "4321" not found.'
+            ),
+        ):
+            self.assertTrue(
+                peer._windows_taskkill(4321),
+                "a tree taskkill cannot find is gone",
+            )
+
+        with mock.patch.object(
+            peer.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                (), 1, b"", b"ERROR: Access is denied."
+            ),
+        ):
+            with self.assertRaises(BridgeError) as caught:
+                peer._windows_taskkill(4321)
+        self.assertEqual(caught.exception.failure, Failure.CLEANUP_FAILURE)
+        self.assertIn("Access is denied", caught.exception.detail)
+        self.assertIn("4321", caught.exception.detail)
 
 
 if __name__ == "__main__":

@@ -10,9 +10,12 @@ could be used right now. `build_command` composes the one fixed argument vector
 a review turn runs. There is deliberately no work builder: one-shot Hermes
 auto-bypasses approvals (see `CAPABILITIES` for the full finding), so work mode
 is refused with that reason instead of built. Both operations do the same
-inexpensive prerequisites first, because a turn that skipped them would find
-out about a missing sign-in or a renamed switch in the middle of real work,
-with the peer already running.
+inexpensive readiness questions first - where the program is, its version, this
+computer, the Portal sign-in - because a turn that skipped them would find out
+about a missing sign-in in the middle of real work, with the peer already
+running. The review vector's switch qualification belongs to review calls
+alone: a work-mode check performs none of it, because there is no work vector
+whose switches could be prerequisites of the unsupported report.
 
 **A courier, not a reviewer.** Hermes switches tools on and off in whole
 groups, and the group that reads a file is the group that writes one: `file`
@@ -231,15 +234,19 @@ def _signed_in(status: CompletedCall) -> str:
 
 
 def _prerequisites(
-    deadline: Deadline, cwd: str
+    deadline: Deadline, cwd: str, work: bool = False
 ) -> Tuple[str, str, str, str, Tuple[str, ...]]:
     """Everything that has to be true before starting Hermes is worth doing.
 
-    Five questions in order, each one cheap and none of them a model turn: is
-    the program here, is its version one this connector was tested against, is
-    this computer one it was tested on, is the subscription signed in and
-    selected, and does the installed version still have every switch the turn
-    relies on. Any of them failing raises, so nothing further happens.
+    Four questions, each one cheap and none of them a model turn: is the
+    program here, is its version one this connector was tested against, is
+    this computer one it was tested on, and is the subscription signed in and
+    selected. A review turn then asks a fifth - does the installed version
+    still have every switch the review vector relies on - which a work-mode
+    check does not ask at all: work is unsupported for reasons recorded in
+    `CAPABILITIES`, read from the program's own source and help, and no
+    review switch is a prerequisite of reporting that. Any failing question
+    raises, so nothing further happens.
 
     Returns the four facts a readiness report needs and a turn uses: where the
     program is, which version answered, how this computer describes itself, and
@@ -258,10 +265,11 @@ def _prerequisites(
         connectors.probe((program, "portal", "info"), cwd, deadline)
     )
 
-    connectors.qualified_restrictions(
-        connectors.probe((program, "--help"), cwd, deadline),
-        QUALIFICATION,
-    )
+    if not work:
+        connectors.qualified_restrictions(
+            connectors.probe((program, "--help"), cwd, deadline),
+            QUALIFICATION,
+        )
     warnings.append(WARNING)
     return program, version, described, account, tuple(warnings)
 
@@ -275,12 +283,21 @@ def check(
     are asked somewhere with nothing in it. No real project is touched, nothing
     is installed, nobody is logged in, no model or provider is chosen, and
     nothing is written down for next time. A work-mode check answers the same
-    review mechanics; the connector's declared capabilities carry the fact
-    that work mode itself is unsupported, rather than the check failing.
+    readiness questions with no switch qualification at all; the connector's
+    declared capabilities carry the fact that work mode itself is unsupported,
+    rather than review switches gating that report.
     """
-    program, version, described, account, warnings = _prerequisites(deadline, cwd)
+    program, version, described, account, warnings = _prerequisites(
+        deadline, cwd, work=(mode == "work")
+    )
     return connectors.readiness(
-        HARNESS_ID, program, version, described, account, warnings
+        HARNESS_ID,
+        program,
+        version,
+        described,
+        account,
+        warnings,
+        switches_confirmed=(mode != "work"),
     )
 
 

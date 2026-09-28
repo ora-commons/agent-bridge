@@ -21,6 +21,21 @@ confirms that the group's number really is the child's own process id, which is
 the check that makes it impossible to signal the group Agent Bridge itself is
 running in.
 
+On Windows the same ownership is built with that platform's own primitives,
+because the Unix ones do not exist there. The child is created with
+`CREATE_NEW_PROCESS_GROUP`, which makes it the leader of a brand new group
+numbered by its own process id - the direct twin of the new session, and the
+fact the ownership check relies on rather than reads back. The polite signal is
+the console break event that group exists to receive, a courtesy a child may
+ignore and a console-less caller cannot even send. The guarantee therefore
+lives in the forced phase: the operating system's own `taskkill /T /F` on the
+root pid, which terminates the whole descendant tree, reaching even a
+grandchild that put itself into a group of its own. Emptiness is confirmed
+through the same command: a tree it cannot find is gone. The Unix branches
+below are untouched by all of this, and no Windows machine was available to
+exercise the Windows branches live - they are covered by the unit checks with
+the Windows primitives simulated, and that limit is stated rather than hidden.
+
 **What ends the waiting.** Three things can: the program answers, the deadline
 passes, or somebody stops Agent Bridge - with an interrupt from the keyboard, or
 with a termination or hangup signal. All three become exceptions, so all three
@@ -109,6 +124,36 @@ POLL_SECONDS = 0.02
 #: about the model. A turn that wants no reports leaves the hook unset.
 HEARTBEAT_SECONDS = 30.0
 
+#: Whether the process-group twins below run their Windows branches, decided
+#: from the operating system at import time. The unit checks simulate the
+#: Windows branch by patching this and the taskkill twin, because no Windows
+#: machine is part of the qualification.
+WINDOWS = os.name == "nt"
+
+#: The Windows creation flag that makes the child the leader of a brand-new
+#: process group numbered by its own process id: the twin of
+#: `start_new_session`. It does not exist on POSIX, where the flag is not
+#: used and a missing constant reads as zero.
+_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
+#: The Windows console signal that can be sent to a whole process group. It
+#: exists only on Windows; where it does not, there is no courtesy signal to
+#: send and the forced phase is the whole of termination.
+_CTRL_BREAK_EVENT = getattr(signal, "CTRL_BREAK_EVENT", None)
+
+#: The escalation signal, resolved once here rather than named per call,
+#: because Windows CPython defines no `SIGKILL`: naming it inside the Windows
+#: branch would raise `AttributeError` before any of that platform's cleanup
+#: could run. Where the attribute does not exist the sentinel resolves to
+#: `None`, the caller passes that same `None` back as the escalation request,
+#: and the forced tree termination is the whole of escalation. On POSIX it is
+#: the real `SIGKILL`, and the branches below behave as they always did.
+_SIGKILL = getattr(signal, "SIGKILL", None)
+
+#: The exit status `taskkill` reports for a pid it could not find, which is
+#: how emptiness of the owned tree is confirmed on Windows.
+_TASKKILL_NOT_FOUND = 128
+
 
 class Deadline(object):
     """One deadline for a whole turn, made once and passed down.
@@ -171,8 +216,14 @@ class SignalStop(Exception):
         self.number = number
 
 
-#: The two signals a turn turns into `SignalStop`.
-STOP_SIGNALS: Tuple[int, ...] = (signal.SIGTERM, signal.SIGHUP)
+#: The two signals a turn turns into `SignalStop`. SIGHUP does not exist on
+#: Windows, where SIGTERM is the one deliverable termination signal, so the
+#: pair is named without it there rather than failing to import at all.
+STOP_SIGNALS: Tuple[int, ...] = (
+    (signal.SIGTERM, signal.SIGHUP)
+    if hasattr(signal, "SIGHUP")
+    else (signal.SIGTERM,)
+)
 
 #: An interrupt from the keyboard goes on raising `KeyboardInterrupt`, exactly
 #: as it always did. It is handled here all the same, and for one reason only:
@@ -311,13 +362,70 @@ class PeerTimeout(BridgeError):
         self.stderr = stderr
 
 
+def _windows_taskkill(pgid: int) -> bool:
+    """Force the owned process tree to terminate; say whether it was gone.
+
+    `taskkill /T` walks the descendant tree from the root pid and `/F`
+    terminates every process it names, which is the one reliable way to reach
+    grandchildren on Windows. The stdlib offers nothing that does: `os.kill`
+    maps every non-console signal, zero included, to `TerminateProcess` on
+    the one named process - so the usual signal-zero emptiness question would
+    itself be a kill - and its console events reach only processes sharing
+    this console and are ignored by any child that installed a handler.
+    taskkill's exit status therefore doubles as the emptiness answer: not
+    found means the tree was already gone, success means something was found
+    and has now been terminated, and anything else is a cleanup failure named
+    here.
+    """
+    try:
+        completed = subprocess.run(
+            ("taskkill", "/T", "/F", "/PID", str(pgid)),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            timeout=ESCALATION_GRACE_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BridgeError(
+            Failure.CLEANUP_FAILURE,
+            detail=(
+                "taskkill could not terminate the process tree of {0}: "
+                "{1}".format(pgid, exc)
+            ),
+        )
+    if completed.returncode == _TASKKILL_NOT_FOUND:
+        return True
+    if completed.returncode != 0:
+        raise BridgeError(
+            Failure.CLEANUP_FAILURE,
+            detail=(
+                "taskkill exited {0} while terminating the process tree of "
+                "{1}: {2}".format(
+                    completed.returncode,
+                    pgid,
+                    completed.stderr.decode("utf-8", "replace").strip()[:160],
+                )
+            ),
+        )
+    return False
+
+
 def _group_gone(pgid: int) -> bool:
     """Is the process group empty? Signal zero asks without disturbing it.
 
     A process that has died but not yet been collected by its parent still
     answers, so the direct child must be collected before this answer means
     anything.
+
+    On Windows there is no signal-zero question to ask - `os.kill` there
+    terminates the named process for any non-console signal, zero included -
+    so the emptiness answer comes from the same forced tree termination: a
+    tree taskkill cannot find is gone, and a tree it finds is terminated by
+    the asking, which during cleanup is what the question wanted anyway.
     """
+    if WINDOWS:
+        return _windows_taskkill(pgid)
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
@@ -339,7 +447,30 @@ def _await_group_gone(pgid: int, grace: float) -> bool:
         time.sleep(POLL_SECONDS)
 
 
-def _signal_group(pgid: int, number: int) -> None:
+def _signal_group(pgid: int, number: Optional[int]) -> None:
+    """Terminate exactly the group this turn started.
+
+    On POSIX that is one signal to the group. On Windows the polite signal is
+    the console break event the group was created to receive - a courtesy a
+    child may ignore and a console-less caller cannot send, so its failure is
+    swallowed and the guarantee lives in the forced phase, where `taskkill
+    /T /F` terminates the whole tree. The escalation arrives as the `_SIGKILL`
+    sentinel rather than a signal Windows CPython could name: there the
+    sentinel is `None`, and comparing against it - instead of reaching for the
+    missing attribute - is what keeps the branch from raising before any
+    cleanup can run. A group that is already gone is left alone, either way.
+    """
+    if WINDOWS:
+        if number == _SIGKILL:
+            _windows_taskkill(pgid)
+            return
+        if _CTRL_BREAK_EVENT is not None:
+            try:
+                os.kill(pgid, _CTRL_BREAK_EVENT)
+            except OSError:
+                # Courtesy only: the forced phase follows regardless.
+                pass
+        return
     try:
         os.killpg(pgid, number)
     except ProcessLookupError:
@@ -376,7 +507,14 @@ def _own_group(process: "subprocess.Popen") -> int:
     asked to become a session leader, so its group number must equal its own
     process id. If it does not, this turn does not own a group it can safely
     signal, and it says so instead of signalling anything.
+
+    On Windows the same fact comes from the spawn flag instead of a read-back:
+    `CREATE_NEW_PROCESS_GROUP` makes the child the leader of a brand-new group
+    numbered by its own process id, so the flag is the confirmation and there
+    is nothing to consult.
     """
+    if WINDOWS:
+        return process.pid
     try:
         pgid = os.getpgid(process.pid)
     except OSError as exc:
@@ -403,8 +541,12 @@ def _cleanup_group(process: "subprocess.Popen", pgid: int) -> None:
     """Terminate exactly the group this turn started, and confirm it is empty.
 
     Asks politely first, collects the direct child so a corpse cannot be
-    mistaken for a survivor, and escalates against the same group only. If
-    anything in the group is still there after the escalation grace, that is
+    mistaken for a survivor, and escalates against the same group only. The
+    escalation is the `_SIGKILL` sentinel, not a named attribute, because
+    Windows CPython defines no such signal: there the sentinel is `None` and
+    the forced tree termination is the whole of escalation, while on POSIX the
+    sentinel is the real `SIGKILL` and nothing changes. If anything in the
+    group is still there after the escalation grace, that is
     `CLEANUP_FAILURE`: an unreported survivor would be worse than a visible
     failure.
     """
@@ -417,7 +559,7 @@ def _cleanup_group(process: "subprocess.Popen", pgid: int) -> None:
     _reap(process, CLEANUP_GRACE_SECONDS)
     if _await_group_gone(pgid, CLEANUP_GRACE_SECONDS):
         return
-    _signal_group(pgid, signal.SIGKILL)
+    _signal_group(pgid, _SIGKILL)
     _reap(process, ESCALATION_GRACE_SECONDS)
     if _await_group_gone(pgid, ESCALATION_GRACE_SECONDS):
         return
@@ -467,17 +609,28 @@ def run_bounded(
     with stopped_by_signal() as watch:
         with watch.deferring():
             try:
+                spawn = {
+                    "stdin": subprocess.PIPE,
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.PIPE,
+                    "shell": False,
+                    "close_fds": True,
+                }
+                if WINDOWS:
+                    # The Windows twin of the new session: a new process
+                    # group, led by the child and numbered by its own pid.
+                    # `start_new_session` has no meaning there, and the
+                    # creation flag has no meaning on POSIX, so the branch is
+                    # the whole difference between the two platforms.
+                    spawn["creationflags"] = _CREATE_NEW_PROCESS_GROUP
+                else:
+                    spawn["start_new_session"] = True
                 try:
                     process = subprocess.Popen(
                         list(argv),
                         cwd=cwd,
                         env=dict(env),
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        shell=False,
-                        close_fds=True,
-                        start_new_session=True,
+                        **spawn
                     )
                 except OSError as exc:
                     # The one refusal that is about the call rather than the

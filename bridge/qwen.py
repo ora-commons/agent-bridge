@@ -212,8 +212,17 @@ def parse_response(output: str) -> str:
 
 
 def _prerequisites(
-    deadline: Deadline, cwd: str
+    deadline: Deadline, cwd: str, work: bool = False
 ) -> Tuple[str, str, str, str, Tuple[str, ...]]:
+    """Readiness facts, with the review switch set qualified for review alone.
+
+    A review turn proves the review vector's switches exist on the installed
+    program. A work-mode check performs no switch qualification at all: work
+    is unsupported for reasons recorded in `CAPABILITIES`, read from the
+    installed program's source, and no review switch is a prerequisite of
+    reporting that. The version and platform facts and the honest
+    authentication state are the same in both modes.
+    """
     warnings = []  # type: List[str]
     program = connectors.executable(QUALIFICATION.cli_identity)
     environment = _environment(cwd)
@@ -225,10 +234,11 @@ def _prerequisites(
         warnings,
     )
     described = connectors.qualified_platform(QUALIFICATION, warnings)
-    connectors.qualified_restrictions(
-        connectors.probe((program, "--help"), cwd, deadline, environment),
-        QUALIFICATION,
-    )
+    if not work:
+        connectors.qualified_restrictions(
+            connectors.probe((program, "--help"), cwd, deadline, environment),
+            QUALIFICATION,
+        )
     warnings.extend((INPUT_WARNING, BOUNDARY_WARNING))
     return (
         program,
@@ -242,7 +252,9 @@ def _prerequisites(
 def check(
     deadline: Deadline, cwd: str, mode: str = "review"
 ) -> connectors.CheckResult:
-    program, version, described, account, warnings = _prerequisites(deadline, cwd)
+    program, version, described, account, warnings = _prerequisites(
+        deadline, cwd, work=(mode == "work")
+    )
     return connectors.readiness(
         HARNESS_ID,
         program,
@@ -251,6 +263,7 @@ def check(
         account,
         warnings,
         authentication_confirmed=False,
+        switches_confirmed=(mode != "work"),
     )
 
 

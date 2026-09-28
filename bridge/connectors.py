@@ -393,6 +393,7 @@ def readiness(
     authentication: str,
     warnings: Sequence[str] = (),
     authentication_confirmed: bool = True,
+    switches_confirmed: bool = True,
 ) -> CheckResult:
     """The truthful mechanics and authentication state printed by ``check``.
 
@@ -402,6 +403,11 @@ def readiness(
     established. Some CLIs expose no safe state-free authentication check; for
     those, successful readiness means the fixed call mechanics are present and
     the selected bounded call will report an authentication failure honestly.
+
+    `switches_confirmed` states whether the mode being reported on actually
+    qualified a fixed-vector switch set. A work-mode check of a connector with
+    no work vector qualifies nothing, and its sentence omits the clause rather
+    than claiming switches were verified that nobody looked for.
     """
     if authentication_confirmed:
         state = "{0} is ready".format(harness_id)
@@ -409,13 +415,19 @@ def readiness(
         state = (
             "{0} mechanics are ready, but live authentication is unconfirmed"
         ).format(harness_id)
-    return CheckResult(
-        message=(
+    if switches_confirmed:
+        message = (
             "{0}: version {1} at {2}, on {3}, {4}, and every "
             "required fixed-vector switch is present.".format(
                 state, version, program, described_platform, authentication
             )
-        ),
+        )
+    else:
+        message = "{0}: version {1} at {2}, on {3}, {4}.".format(
+            state, version, program, described_platform, authentication
+        )
+    return CheckResult(
+        message=message,
         warnings=tuple(warnings),
         executable=program,
         version=version,
