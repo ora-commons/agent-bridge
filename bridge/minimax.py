@@ -4,9 +4,9 @@ MiniMax Code 0.2.7 has a stable headless ``mcode exec`` transport, but no
 headless permission mode that confines its tools. Agent Bridge therefore gives
 its review calls only a task-owned neutral directory and reports the remaining
 tool and configuration authority instead of presenting ``smart`` as a sandbox.
-Work calls use the same ``exec`` with its ordinary defaults: ``smart`` is the
-program's own default permission policy, the workspace comes from ``--cwd``,
-and the review-only one-step bound is not imposed.
+Work calls use the same ``exec`` under the program's own ordinary defaults and
+with no permission policy selected by Bridge: the workspace comes from
+``--cwd``, and the review-only one-step bound is not imposed.
 
 SPDX-License-Identifier: CC0-1.0
 """
@@ -42,18 +42,23 @@ QUALIFICATION = connectors.Qualification(
 )
 
 #: What this connector offers beyond its restricted review call. Work is the
-#: ordinary `mcode exec` invocation: `smart` is the program's own default
-#: permission policy for a headless run (its source rejects only `ask`, which
-#: needs a TUI), the workspace comes from `--cwd`, and no assistant-step bound
-#: is imposed unless the caller names one. Images have a native attachment
-#: switch; mcode's source turns image MIME types into model image content.
+#: ordinary `mcode exec` invocation with no permission policy of Bridge's
+#: choosing: the program's own headless default governs (read from its source,
+#: an absent `--permission` is fixed at `smart`, and no runtime configuration
+#: can change the permission mode of a headless run), `ask` needs an
+#: interactive host and is rejected by `mcode exec` itself, while `full` and
+#: `off` are approval bypasses Bridge never selects. Images have a native
+#: attachment switch; mcode's source turns image MIME types into model image
+#: content.
 CAPABILITIES = connectors.Capabilities(
     work="supported",
     work_detail=(
-        "work uses mcode exec with the caller's project as --cwd, its "
-        "ordinary default permission policy smart (ask needs an interactive "
-        "host; full and off are approval bypasses Bridge never selects), and "
-        "no imposed assistant-step bound unless --max-steps names one"
+        "work uses mcode exec with the caller's project as --cwd and no "
+        "permission policy selected by Bridge: the program's own headless "
+        "default (smart) governs, ask cannot run headless and is rejected "
+        "by mcode exec itself, and full and off are approval bypasses "
+        "Bridge never selects; no assistant-step bound is imposed unless "
+        "--max-steps names one"
     ),
     image="supported",
     image_detail=(
@@ -70,13 +75,19 @@ WORK_RESTRICTIONS = (
 )
 
 WORK_WARNING = (
-    "MiniMax Code work runs with the program's ordinary headless defaults: "
-    "--permission smart is a discretionary permission mode, not a sandbox, so "
-    "the model's tool use is governed by MiniMax's own policy engine and by "
-    "surviving user/provider configuration, and no assistant-step bound is "
-    "imposed unless --max-steps names one, so the turn deadline is the only "
-    "outer bound. Writes are confined by nothing except that policy; treat "
-    "the working and access directories as writable."
+    "MiniMax Code work runs with the program's ordinary headless defaults "
+    "and no permission policy selected by this vector: mcode exec's own "
+    "default governs, which its source fixes at smart when --permission is "
+    "absent, and no runtime configuration can change the permission mode of "
+    "a headless run. smart is a discretionary permission mode, not a "
+    "sandbox, so the model's tool use is governed by MiniMax's own policy "
+    "engine and by surviving user/provider configuration; ask is interactive "
+    "and rejected by mcode exec, which names the TUI or ACP as its route, "
+    "and full and off are approval bypasses Bridge never selects. No "
+    "assistant-step bound is imposed unless --max-steps names one, so the "
+    "turn deadline is the only outer bound. Writes are confined by nothing "
+    "except that policy; treat the working and access directories as "
+    "writable."
 )
 
 WARNING = (
@@ -281,16 +292,21 @@ def build_work_command(
     """The ordinary `mcode exec` work invocation, review-only bounds removed.
 
     The workspace is the session's working directory, named by `--cwd` as the
-    program itself expects. The permission policy is `smart`, which is the
-    program's own default for a headless run; `ask` cannot run headless and
-    `full` and `off` are approval bypasses, so neither is ever selected. The
-    review call's one-assistant-step bound is not imposed: `--max-steps` is
-    passed only when the caller names a bound, and otherwise MiniMax's own
-    default governs the run inside Bridge's deadline. Each attachment becomes
-    one `--file`, which mcode hands to the model as image content. Declared
-    access directories are recorded in the session and stay reachable as
-    ordinary same-user paths; mcode has no per-call switch that widens its
-    workspace.
+    program itself expects. No permission policy is selected: the vector
+    passes no `--permission`, so the effective policy is mcode exec's own,
+    which its source fixes at `smart` when the switch is absent - the same
+    posture an ordinary headless `mcode exec` runs under, with no runtime
+    configuration able to change the permission mode of a headless run.
+    `ask` cannot run headless and is rejected by `mcode exec` itself with
+    the TUI or ACP named as its route, and `full` and `off` are approval
+    bypasses Bridge never selects, so there is no configured posture this
+    vector could be silently replacing. The review call's one-assistant-step
+    bound is not imposed: `--max-steps` is passed only when the caller names
+    a bound, and otherwise MiniMax's own default governs the run inside
+    Bridge's deadline. Each attachment becomes one `--file`, which mcode
+    hands to the model as image content. Declared access directories are
+    recorded in the session and stay reachable as ordinary same-user paths;
+    mcode has no per-call switch that widens its workspace.
     """
     validate_run_options(max_steps, required_model)
     program, _version, _described, _account, warnings = _prerequisites(
@@ -316,8 +332,6 @@ def build_work_command(
         "text",
         "--cwd",
         cwd,
-        "--permission",
-        "smart",
     ]
     argv.extend(native_timeout)
     for attachment in attachments:

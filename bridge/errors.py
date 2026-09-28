@@ -31,6 +31,7 @@ class Failure(enum.Enum):
     UNQUALIFIED_PLATFORM = "UNQUALIFIED_PLATFORM"
     RESTRICTIONS_UNAVAILABLE = "RESTRICTIONS_UNAVAILABLE"
     QUALIFICATION_UNSAFE_OR_INCONCLUSIVE = "QUALIFICATION_UNSAFE_OR_INCONCLUSIVE"
+    WORK_POSTURE_UNAVAILABLE = "WORK_POSTURE_UNAVAILABLE"
 
     # Running one bounded turn.
     BUSY_SESSION = "BUSY_SESSION"
@@ -99,6 +100,14 @@ _GUIDANCE: Dict[Failure, Tuple[str, str]] = {
         "Read the reported synthetic-repository path, work out what happened, "
         "and rerun qualification; do not use this harness on a real project "
         "until it passes.",
+    ),
+    Failure.WORK_POSTURE_UNAVAILABLE: (
+        "The selected tool's effective permission posture cannot perform the "
+        "authorized work noninteractively, so the work call was refused "
+        "before anything was published.",
+        "Run that tool in its own terminal for this work, where its normal "
+        "approval flow can ask you directly, or change that tool's own "
+        "configuration to a posture that can perform the work headlessly.",
     ),
     Failure.BUSY_SESSION: (
         "Another Agent Bridge turn is already holding this session's lock.",
