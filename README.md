@@ -1,29 +1,83 @@
 # Agent Bridge
 
+Get a second opinion from the AI coding tools you already use.
+
+Send a focused request from your app or coding assistant to another signed-in
+coding tool, then bring its answer back. Use it to challenge a plan, review
+work, or hand off a bounded task, with a readable record of the exchange.
+
 Agent Bridge is a standalone one-to-many Markdown courier. Any application or
 harness can use one shared checkout to make a bounded call to Codex, Claude
-Code, ZCode, Hermes Agent, MiniMax Code, or Qwen Code through its official vendor
-CLI. Bridge does not connect model APIs; an ordinary caller need not be an agent.
+Code, ZCode, Hermes Agent, MiniMax Code, or Qwen Code through its official
+vendor CLI. Bridge does not connect model APIs; an ordinary caller need not
+be an agent.
 
-Bridge owns target readiness, one request and one response per foreground call,
-an ordered Markdown record, the strongest practical restrictions and concrete
-warnings, one lock per session, atomic publication, deadlines, and cleanup.
-Applications own everything else: planning, review, target selection, combining
-answers, Git, and response interpretation. Bridge has no coordinator, router,
-scheduler, database, daemon, workflow engine, Git gate, or background service.
+## Capabilities
 
-The six target identifiers are literal: `codex`, `claude`, `zcode`, `hermes`,
-`minimax`, and `qwen`. Only the selected connector is imported or examined;
-the other five stay inert, with no probe, process, project access, login,
-network call, or fallback. Codex, Claude, and ZCode are project-capable. Hermes,
-MiniMax, and Qwen are courier-only: they receive a neutral directory, never a
-project. Include any evidence those three need in the message body.
+Bridge owns a deliberately small surface and does it reliably:
 
-## Status
+- Target readiness checks with concrete warnings, without a model call.
+- One request and one response per foreground call, with a deadline
+  (900 seconds by default) and bounded cleanup. Bridge never retries.
+- An ordered, human-readable Markdown record of every exchange under
+  `~/.agent-bridge/sessions/`, outside Git and cloud sync.
+- Two calling modes on one runtime:
+  - **Review courier** (the original mode): a restricted, read-only review
+    call with the strongest practical vendor safeguards for that CLI.
+  - **Work mode** (opt-in, Format 3 sessions): ordinary project work under
+    the tool's own normal permissions, with a project directory for
+    project-capable tools, optional additional access directories, optional
+    image attachments, machine-readable readiness JSON, and lifecycle events
+    (`--events-jsonl`) for applications that watch a turn live.
+- A limited identity report: where the target's own structured output names
+  the model that answered (MiniMax Code with `--require-model`), Bridge
+  preserves that tool-reported identity in the finished event and the
+  response record. Bridge never selects or changes a model itself.
 
-Release 1 has passed six harness-adapter and arbitrary-application checks and
-real calls for all six targets, including Qwen's corrected stream input.
-The exercised platform is macOS 26 on Apple silicon (arm64):
+The six target identifiers are literal: `codex`, `claude`, `zcode`,
+`hermes`, `minimax`, and `qwen`. Only the selected connector is imported or
+examined; the other five stay inert, with no probe, process, project access,
+login, network call, or fallback.
+
+| Target | Project in review mode | Work mode |
+|---|---|---|
+| Codex | Project-capable | Supported |
+| Claude Code | Project-capable | Supported |
+| ZCode | Project-capable | Supported |
+| Hermes Agent | Courier-only | Unsupported (courier only) |
+| MiniMax Code | Courier-only | Supported |
+| Qwen Code | Courier-only | Unsupported (courier only) |
+
+Courier-only targets receive a neutral directory, never a project, so a
+request to them must carry all needed evidence in the message body. Where a
+tool cannot do non-interactive work under ordinary permissions (Hermes
+Agent, Qwen Code), Bridge reports work unsupported with the real vendor
+limitation instead of quietly weakening anything.
+
+Every call starts a fresh tool context: no vendor session is resumed and no
+earlier message is resent. Include needed history in the body.
+
+## Limits
+
+Bridge has no coordinator, router, scheduler, database, daemon, workflow
+engine, Git gate, or background service. Applications own planning, review,
+target selection, combining answers, Git, and response interpretation.
+
+Bridge is not a confidentiality boundary: each target CLI is a trusted
+program running under your own operating-system account and can read other
+files that account can read. Complete confinement is not claimed. See
+"Safety and warnings" below.
+
+There is no support, maintenance, or future compatibility promise. Bridge
+installs no vendor program, signs in to nothing, and has no API fallback.
+
+## Tested and untested routes
+
+Everything below was exercised on macOS 26 on Apple silicon (arm64). No
+other platform qualification is claimed, and Windows is untested (see below).
+
+Review-courier real calls passed for all six targets with these CLI
+versions:
 
 | Target | Exercised CLI version |
 |---|---|
@@ -34,98 +88,180 @@ The exercised platform is macOS 26 on Apple silicon (arm64):
 | MiniMax Code | 0.2.7 |
 | Qwen Code | 0.23.0 |
 
-The opt-in working mode added on September 27, 2026 gives an application a
-way to send ordinary project work — not just restricted review calls — to a
-selected tool, with explicit image attachments, machine-readable readiness,
-and lifecycle events. It was implemented and source-verified against the
-then-installed Codex 0.155.1, Claude Code 2.1.278, ZCode 0.16.9, Hermes
-0.21.3, MiniMax Code 0.2.7, and Qwen Code 0.23.0, and live-qualified for the
-four targets that have an ordinary-permission work route: Codex, Claude Code,
-ZCode, and MiniMax Code. Hermes Agent and Qwen Code report work and images
-unsupported, with the real vendor limitation and the terminal route in the
-message; see the interface's work-route table. All flag-free review behavior
-is unchanged.
+Work mode was live-qualified once per supported route in disposable
+fixtures (a synthetic Git repository as the code directory, an access
+directory outside it, and one distinctive attachment image), with these CLI
+versions:
 
-No other platform qualification is claimed. There is no support, maintenance,
-or future compatibility promise. Qualification describes the source and CLI
-combination; it does not install or update anything on a user's machine.
+| Target | Exercised CLI version |
+|---|---|
+| Codex | 0.155.1 |
+| Claude Code | 2.1.278 |
+| ZCode | 0.16.9 |
+| MiniMax Code | 0.2.7 |
 
-Two platform twins were added on September 28, 2026 for Windows, where no
-machine was available to test them live: the session lock takes its advisory
-lock with `msvcrt.locking` there (`fcntl.flock` on POSIX), and child-process
-cleanup creates the peer with `CREATE_NEW_PROCESS_GROUP` and
-`CREATE_SUSPENDED`, assigns the kill-on-close job object while the peer has
-not yet executed one instruction, resumes the peer only then, and terminates
-the whole descendant tree by closing that job — with the operating system's
-`taskkill /T /F` as a belt-and-braces force and as the confirmation, so the
-tree is owned from the peer's first possible action and ownership survives
-the peer's own exit (process-group signals on POSIX). Both Windows branches
-are exercised only by unit tests with the platform's primitives simulated; no
-live Windows qualification is claimed, and the connector qualifications above
-remain macOS.
+Hermes Agent 0.21.3 and Qwen Code 0.23.0 were source-verified for the work
+and image findings above; no work call is claimed for them.
 
-## Requirements and source setup
+Windows is untested. No Windows machine was used for any check. The
+Windows-specific branches — the session lock (`msvcrt.locking`) and
+child-process tree cleanup through a kill-on-close job object — are
+exercised only by unit checks with the platform's primitives simulated on a
+Mac. All connector qualification above is macOS.
 
-You need Python 3.9 or later and the selected target's official CLI with its own
-working vendor sign-in. Bridge uses only the Python standard library; no Python
-dependency installation is needed. The ordinary executable names are `codex`,
-`claude`, `hermes`, `mcode` (MiniMax), and `qwen`. ZCode uses `node` and the bundle
-at `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs` instead of a
-`zcode` command on `PATH`. When the installed app ships the bundle's built-in
-provider file where the bundle does not look for it, as ZCode 3.14.1 does,
-Bridge starts the bundle through `~/Library/Caches/agent-bridge/zcode-launcher`,
-an owner-only folder holding just two symbolic links: one to the bundle and
-one to that file. Bridge installs no vendor program, signs in to
-nothing, selects no model or provider, and has no API fallback.
+A readable CLI version outside the exercised evidence may still work: when
+the required mechanics remain usable, Bridge proceeds with a warning.
 
-The existing repository's source-install route is a Git checkout:
+## Requirements
+
+- Git, to clone the repository and select a release tag.
+- Python 3.9 or later. Bridge uses only the Python standard library; no
+  Python dependency installation is needed.
+- The selected target's official CLI with its own working vendor sign-in.
+  The ordinary executable names are `codex`, `claude`, `hermes`, `mcode`
+  (MiniMax), and `qwen`. ZCode uses `node` and the bundle at
+  `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs` instead of a
+  `zcode` command on `PATH`.
+
+One note for ZCode: when the installed app ships the bundle's built-in
+provider file where the bundle does not look for it, Bridge starts the
+bundle through `~/Library/Caches/agent-bridge/zcode-launcher`, an
+owner-only folder holding just two symbolic links (one to the bundle, one
+to that file). That launcher folder is the only thing Bridge writes outside
+its sessions.
+
+## Get the source
+
+Bridge installs from a public Git checkout. There is no package to install
+and no `agent-bridge` console command; the checkout is the installation:
 
 ```sh
 git clone https://github.com/ora-commons/agent-bridge.git
-cd /absolute/path/to/agent-bridge
+cd agent-bridge
+git checkout v1.1.0
 ```
 
-Replace the second line with your checkout's actual absolute path. Run
-`python3 -m bridge` from that checkout root. This repository-only source route
-does not install a console command or adapter; do not assume an installed
-`agent-bridge` executable. The commands below require the Release 1 source
-described here, not an earlier checkout.
+`v1.1.0` is this release's tag. Run every Bridge command from the absolute
+checkout root with `python3 -m bridge ...`. These instructions need no
+private repository and no personal settings.
 
-That checkout is the complete Bridge installation and is usable without Vibe,
-Programming Loop, Gear, or any harness skill. To update a clean Git checkout,
-first let every Bridge command using it exit, then run:
+## Identify your version
+
+Open `bridge/__init__.py` in the checkout. The `VERSION = "1.1.0"` line
+names the release you have. For a clean release checkout, the Git tag you
+selected (`git checkout v1.1.0` above) and that line agree. There is no
+`--version` command.
+
+## A complete work-mode walkthrough
+
+This example uses a disposable project, asks Codex for one file with
+specified contents, then checks the file on disk and the saved answer. Run
+every command from the checkout root. The `run` step is a real model call:
+it can take minutes and consume the target tool's quota.
+
+Create the disposable project and check that Codex can take work calls
+right now (no model call, no project touched):
 
 ```sh
-git -C /absolute/path/to/agent-bridge pull --ff-only
+mkdir -p /tmp/agent-bridge-demo
+python3 -m bridge check --peer codex --mode work
 ```
 
-Do not use that command to overwrite local edits. Repeat `check` for the
-selected target before the next call. A copied harness skill is separate from
-the runtime: replace it from the same accepted revision through the host's
-normal skill-management mechanism. Bridge does not synchronize installed
-copies.
+Read the readiness result and any `Warning:` lines. If it fails, resolve
+the reported problem before proceeding.
 
-To remove Bridge, first let every command using the checkout exit, then remove
-only that checkout and any optional harness-skill copies installed from it.
-Removing Bridge does not remove a vendor CLI, sign out of a vendor account,
-change vendor configuration, or delete session directories elsewhere. Keep or
-remove `$HOME/.agent-bridge/sessions` separately according to whether their
-human-readable records are still needed.
-
-## First call from a checkout
-
-From the absolute checkout root, check your target without a model turn (Codex here):
+Create a work session bound to one initiator label, one target, and the
+project directory. The initiator is an inert record label, not
+authentication; `my-app` works for any caller. These fields are immutable
+once created:
 
 ```sh
-python3 -m bridge check --peer codex
+python3 -m bridge record \
+  --session "$HOME/.agent-bridge/sessions/demo-work" \
+  --kind session-create --initiator my-app --peer codex \
+  --mode work --project /tmp/agent-bridge-demo <<'MARKDOWN'
+A disposable work session for one small file task.
+MARKDOWN
 ```
 
-Read the full readiness result and warnings. If it fails, resolve the reported
-problem before proceeding. For ZCode, MiniMax, and Qwen, readiness can establish
-call mechanics but cannot confirm live authentication without a real call.
+Omit `--project` only when no code directory exists yet. Add
+`--access-path` (repeatable) when the request needs additional existing
+directories. Use a different session for a different target or project.
 
-Choose an unused session name outside Git and cloud sync. `$HOME` expands to an
-absolute path. Create the session through Bridge, not by writing `SESSION.md`:
+Send one self-contained request and wait in the foreground:
+
+```sh
+python3 -m bridge run \
+  --session "$HOME/.agent-bridge/sessions/demo-work" <<'MARKDOWN'
+Create the file /tmp/agent-bridge-demo/bridge-greeting.txt containing
+exactly one line and nothing else:
+
+Bridge work mode says hello.
+
+Then answer with the file's path and the exact contents you wrote.
+Create and modify no other file.
+MARKDOWN
+```
+
+On success, standard output is the absolute path of the response record.
+Now check the work product and the saved answer:
+
+```sh
+cat /tmp/agent-bridge-demo/bridge-greeting.txt
+```
+
+which should print exactly:
+
+```text
+Bridge work mode says hello.
+```
+
+and:
+
+```sh
+cat "$HOME/.agent-bridge/sessions/demo-work/messages/0002-peer-to-initiator.md"
+```
+
+which shows a record like this (the answer text itself varies; the file on
+disk is the canonical answer):
+
+```markdown
+# Message 0002
+From: codex
+To: my-app
+Answers: 0001
+
+## Body
+
+I created /tmp/agent-bridge-demo/bridge-greeting.txt with exactly the one
+requested line: Bridge work mode says hello.
+```
+
+The session folder holds `SESSION.md` (the immutable binding), a numbered
+request and response under `messages/`, and the lock used during the turn.
+A work call runs under the tool's ordinary capabilities and its own normal
+permissions — Bridge selects no approval bypass and no permission posture
+of its own. If the tool cannot complete the call, the request remains as an
+honest record, no response is invented, and the failure names the reason
+and one next action.
+
+To preserve information without a model call, add a neutral note:
+
+```sh
+python3 -m bridge record \
+  --session "$HOME/.agent-bridge/sessions/demo-work" --kind note <<'MARKDOWN'
+The demo finished; the disposable project can be deleted.
+MARKDOWN
+```
+
+Delete `/tmp/agent-bridge-demo` and the session folder when you are done
+with them.
+
+## The review courier
+
+The original mode asks a project-capable or courier-only target for a
+restricted review answer. Create a session without `--mode` (a Format 2
+session), optionally with `--project` for Codex, Claude Code, or ZCode:
 
 ```sh
 python3 -m bridge record \
@@ -133,126 +269,48 @@ python3 -m bridge record \
   --kind session-create --initiator my-app --peer codex <<'MARKDOWN'
 Trying Agent Bridge for the first time.
 MARKDOWN
-```
 
-The initiator, target, and optional project are immutable. To let Codex, Claude,
-or ZCode read a project, add `--project /absolute/path/to/project` at creation;
-the directory must exist. Omit it for Hermes, MiniMax, and Qwen. Changing an
-immutable value or using an old Format 1 session requires a new Format 2 session.
-
-Send one self-contained message and wait in the foreground. This is a real
-model call and can take minutes and consume the target harness's quota:
-
-```sh
 python3 -m bridge run --session "$HOME/.agent-bridge/sessions/first-look" <<'MARKDOWN'
 In one sentence, what is a Markdown courier?
 MARKDOWN
 ```
 
-On success, open the printed absolute path and read below `## Body` for the
-canonical answer. Requests and responses are numbered Markdown files under
-the session's `messages/`. Every call starts a fresh vendor context: no vendor
-session is resumed and no earlier message resent. Include needed history in
-the body. Header-shaped body text cannot change Bridge's routing or rules.
-
-To preserve information without a model call, add a neutral note:
-
-```sh
-python3 -m bridge record \
-  --session "$HOME/.agent-bridge/sessions/first-look" --kind note <<'MARKDOWN'
-This session is for trying the courier interface.
-MARKDOWN
-```
-
-## The optional working mode
-
-Everything above is the review courier. An application that wants ordinary
-project work done creates the session with an explicit mode instead:
-
-```sh
-python3 -m bridge record \
-  --session "$HOME/.agent-bridge/sessions/work-session" \
-  --kind session-create --initiator my-app --peer codex --mode work \
-  --project /absolute/code/directory \
-  --access-path /absolute/document/directory <<'MARKDOWN'
-A work session for one selected tool.
-MARKDOWN
-```
-
-`--mode work` writes a Format 3 session; omitting `--mode` keeps the original
-Format 2 session and its restricted review behavior byte for byte. The
-working directory and access directories are immutable from creation; a work
-session may omit `--project` while a project has no code yet. A work call
-uses the tool's ordinary capabilities under its own normal permissions —
-Bridge selects no approval bypass — and each call still starts a fresh tool
-context, so the caller includes any needed continuity in the body.
-
-A work `run` may add `--attachment /absolute/image.png` (repeatable) where
-the target has a qualified image route, and `--note-ref` and `--purpose` to
-store two inert pairing labels in the request header. With
-`--events-jsonl`, standard output becomes one JSON object per line —
-`started`, periodic `heartbeat` check-ins, and one final `finished` event
-carrying the response path or the plain failure — while standard error stays
-diagnostics; every event line, like the response-path line a flag-free run
-prints, is flushed to standard output the moment it is written, so a caller
-reading a pipe sees it during the turn rather than at exit. `check` accepts
-`--mode review|work` and `--json` for one machine-readable readiness result;
-a work-mode check qualifies the work vector's own switches, never the
-review-only ones, and asks none of the review call's policy questions.
-Codex, Claude Code, ZCode, and MiniMax
-Code have qualified work routes; Hermes Agent and Qwen Code answer work
-unsupported with the real reason and the terminal route. The complete
-contract, including every field and the per-target work and image table, is
-in [INTERFACE.md](INTERFACE.md).
+Read the answer below `## Body` in the printed response path. Omit
+`--project` for Hermes, MiniMax, and Qwen and include needed evidence in
+the body instead. `check --peer <target>` (without `--mode`) checks the
+review vector. The complete Format 2 and Format 3 contract, including the
+per-target work and image routes, is in [INTERFACE.md](INTERFACE.md).
 
 ## Output, failures, and waiting
 
-Keep the two output streams separate; a warning is not the answer path:
+Keep the two output streams separate; a warning is not the answer path.
+`check` success writes a readiness sentence and any `Warning:` lines to
+standard output; `check --json` writes one JSON readiness object instead.
+`run` success writes only the response-file path to standard output
+(`--events-jsonl` replaces it with one JSON event per line and a final
+`finished` event carrying the path); warnings and failures go to standard
+error. Any failure exits nonzero with a reason and one next action on
+standard error — show all of it, not just the last line. Surface every
+warning without asking for acknowledgment.
 
-| Command result | Standard output | Standard error | Exit status |
-|---|---|---|---|
-| `check` success | Readiness sentence and any `Warning:` lines | Empty | 0 |
-| `check --json` success | One JSON readiness object | Empty | 0 |
-| `check --json` failure | One JSON readiness object with `ready: false`, a `reason`, and a `next_action` | Empty | Nonzero |
-| `run` success | Response-file path only | Any `Warning:` lines, before request publication | 0 |
-| `run --events-jsonl` success | One JSON event per line; the final `finished` event carries the response path | Any `Warning:` lines | 0 |
-| `record` success | Written file's canonical path | Empty | 0 |
-| Any command failure | No success path | Reason and next action; any earlier run warnings remain | Nonzero |
+`run` has one deadline for prerequisites, execution, and response capture:
+900 seconds by default, overridden by `--timeout <seconds>`. Keep the
+caller attached longer than the deadline plus cleanup. A target failure
+after publication leaves the truthful request and invents no response. Do
+not turn an uncertain publication into success or automatically retry it.
 
-Surface every warning without asking for acknowledgment. On failure, preserve
-the nonzero result and show all standard error, not just its last line. A
-target failure after publication leaves the truthful request and invents no
-response. If storage publication is uncertain or a directory entry could not
-be flushed, inspect the named path and treat the outcome as unfinished. Do not
-turn that state into success or automatically retry it.
-
-`run` has one deadline for prerequisites, execution, and response capture: 900
-seconds by default, overridden by `--timeout <seconds>`. Cleanup has a separate
-bounded grace period. Keep the caller attached longer than the deadline plus
-cleanup; do not detach it. Bridge never retries and is idle when its command exits.
-
-Only a session targeting MiniMax may add `--max-steps <positive-integer>` or
-`--require-model <provider/model>` to `run`. The first deliberately changes
-MiniMax's default one-assistant-step bound. The second makes Bridge inspect the
-MiniMax 0.2.7 JSON result, require a byte-exact runtime provider/model identity,
-and publish only its final answer text. Bridge validates that identity; it does
-not select or change the model, and it preserves what the tool reported: the
-`finished` event carries optional `model` and `provider` fields, and a Format 3
-response record carries `Model:` and `Provider:` header lines, present only
-when MiniMax reported them. The other five targets' outputs report no identity,
-so their events and records never grow the fields. Omitting both options
-preserves the one-step, plain-text MiniMax call, and either option is refused
+Only a session targeting MiniMax may add `--max-steps <positive-integer>`
+or `--require-model <provider/model>` to `run`. The second makes Bridge
+require a byte-exact runtime provider/model identity in MiniMax's JSON
+result and then publish that tool-reported identity beside the answer (the
+`Model:` and `Provider:` lines described above). Either option is refused
 for every other target before request publication.
 
-## Using Bridge from an application
+## Calling Bridge from an application
 
-An application needs no harness skill, SDK, registration, or Bridge code change.
-Supply an initiator such as `my-app`: an ASCII label starting with a letter or
-digit, then letters, digits, periods, underscores, or hyphens. It is a record
-label, not authentication or authority. Use separate sessions for multiple targets.
-
-Use a fixed argument list and absolute checkout working directory, never a
-shell-built command string. Python can pass `user_selected_target` directly:
+An application needs no harness skill, SDK, registration, or Bridge code
+change. Use a fixed argument list and the absolute checkout as working
+directory, never a shell-built command string:
 
 ```python
 import subprocess
@@ -264,147 +322,110 @@ checked = subprocess.run(
 )
 ```
 
-Show `checked.stdout` and `checked.stderr`; honor `checked.returncode`. Bridge
-validates the target, so the application need not keep a copied target list.
-Use the same subprocess pattern for session creation and notes, adding
-`input=body` for complete nonempty Markdown. For a call, the arguments after
-`bridge` are `run`, `--session`, and the absolute session path, optionally
-`--timeout` and its value. A MiniMax session may also pass the two bounded
-validation options described above. Pass `input=body` and read the response file
-only on exit 0. Target and project come only from the session, not `run`
-arguments. A UI displaying live warnings should drain both streams while
-keeping the process attached.
+Show both streams; honor the exit status; read a response file only on
+exit 0. Supply bodies on standard input. Adding another initiating host is
+documentation and a launcher, not a Bridge change; adding a target is a
+bounded runtime change — both procedures are in [INTERFACE.md](INTERFACE.md).
 
-## Adding an initiating host or a target
+## Optional skills for coding tools
 
-These are deliberately different changes.
+Six optional skill sources ship in this repository:
+[Codex](packages/codex/SKILL.md), [Claude](packages/claude/SKILL.md),
+[ZCode](packages/zcode/SKILL.md), [Hermes](packages/hermes/SKILL.md),
+[MiniMax](packages/minimax/SKILL.md), and [Qwen](packages/qwen/SKILL.md).
+Each tells its host how to use the same checkout, surface warnings and
+failures, send a body, read an answer, and record a note. They are
+guidance, not separate runtimes, and never call each other.
 
-### Add an initiating host
+To use one, copy that `SKILL.md` into your coding tool's skills folder by
+hand (for example `~/.claude/skills/agent-bridge/SKILL.md` for Claude
+Code, or `~/.zcode/skills/agent-bridge/SKILL.md` for ZCode, following your
+tool's own skill conventions). Skills are copied by hand and never
+synchronized: updating the checkout does not update an installed copy, and
+Bridge never writes into a skills folder. A coding tool used only as a
+target needs no skill at all.
 
-An initiating host is a caller. It needs documentation, a skill, or a launcher
-that starts the existing fixed `python3 -m bridge ...` vectors from an absolute
-source checkout. It does not need a Bridge connector, target registration, or
-runtime release. Give it an inert initiator label; let the user select one of
-the six literal targets; pass the complete Markdown body on standard input;
-keep both output streams and the exit status distinct; read a response file
-only after exit 0; and leave the foreground call attached through cleanup.
+## Update
 
-For example, Vibe Coder can create a session labeled `vibe-coder`, store the
-user-selected target in that session, and pass its complete prepared handoff to
-`run`. Bridge records and delivers that one handoff. Vibe still owns project
-selection, approvals, lifecycle state, retry decisions, and interpretation of
-the returned text. No `vibe-coder` branch belongs in Bridge.
+Let every Bridge command using the checkout exit first, then from the
+checkout root:
 
-Before describing a new initiating adapter as tested, use a disposable session
-and fake target to show that it preserves the complete body, selects only the
-named target, surfaces readiness and every warning, honors nonzero failure,
-reads the full saved response, can add a neutral note, and leaves no owned
-process. This is caller evidence; it is not target or model qualification.
+```sh
+git fetch --tags
+git checkout v1.1.1   # the release you are moving to
+```
 
-### Add a target
+(Use the actual new tag; check the repository's tags or releases for the
+latest.) Repeat `check` for your target before the next call. If you
+copied a skill, replace the installed copy by hand from the same revision;
+Bridge does not synchronize installed copies. Do not use Git commands to
+overwrite local edits you want to keep.
 
-A target is a program Bridge is willing to start. Adding one is a bounded
-runtime change, not an entry in a registry:
+## Remove
 
-1. Add one connector module under `bridge/` for the official CLI.
-2. Add the identifier literally to `HARNESS_IDS`, the explicit `_switch`, and
-   `is_courier_only` when the target must not receive a project.
-3. Implement the connector's existing `check` and `build_command` surface. Use
-   a fixed argument vector without a shell, prefer standard input, extract only
-   the final response, and choose the strongest practical vendor restrictions.
-4. Declare exact qualification evidence and concrete non-blocking warnings.
-   Fail before publication when software, authentication evidence, transport,
-   response extraction, required switches, or foreground control is unusable.
-5. Extend the existing focused fake-process and adapter evidence for request,
-   response, note, failure, timeout, atomic publication, unselected-target
-   inertness, and cleanup. Update this guide, the interface, and any initiating
-   skills that should offer the new literal identifier.
+Let every Bridge command using the checkout exit, then delete the checkout
+folder and any skill folders you copied from it. Removing Bridge does not
+remove a vendor CLI, sign out of a vendor account, change vendor
+configuration, or delete session directories elsewhere. Keep or remove
+`~/.agent-bridge/sessions` separately according to whether its
+human-readable records are still needed.
 
-A separately authorized disposable real call on the named CLI version and
-platform is required before claiming that target combination was exercised.
-An implemented route without that call may be published as untested, but not
-as demonstrated. Do not add dynamic discovery, a generated connector, SDK,
-provider fallback, automatic target choice, or all-pairs qualification.
+## Report a problem
+
+Report problems at the repository's issue tracker:
+https://github.com/ora-commons/agent-bridge/issues — include the command
+you ran, both output streams, the exit status, and the CLI version.
+Bridge is published as-is, with no dedicated support channel, no
+maintenance commitment, and no compatibility promise; issues are read on a
+best-effort basis only. Warnings that name a vendor limitation usually
+describe that vendor's design, not a Bridge defect.
+
+## Corrections and withdrawals
+
+If a release is corrected, the correction ships as a new version with a
+new tag (for example v1.1.1) and release notes that say what changed; the
+current README always describes the current release. A withdrawn release
+is withdrawn from the releases page, but earlier versions remain reachable
+at their existing Git tags, and every published release notes its
+exercised platforms and tools. Check
+https://github.com/ora-commons/agent-bridge/releases before installing to
+see the current version and any correction notes.
 
 ## Safety and warnings
 
 Call only vendor CLIs you trust. Each is a program running under your own
-account, not a confidentiality boundary: Bridge cannot stop it reading other
-files that account can read. A project target may load `AGENTS.md`, `CLAUDE.md`,
-or equivalent instructions. Vendor CLIs may keep plaintext transcripts; Bridge
-neither suppresses repository instructions nor deletes or hides those logs.
+account: Bridge cannot stop it reading other files that account can read.
+A project target may load `AGENTS.md`, `CLAUDE.md`, or equivalent
+instructions. Vendor CLIs may keep plaintext transcripts; Bridge neither
+suppresses repository instructions nor deletes or hides those logs.
 
-Every connector uses the strongest practical vendor safeguards for review
-calls and warns about remaining configuration, tool, and external-effect
-limits; a work call uses the tool's ordinary capabilities under its own
-normal permissions instead, keeps every warning that still applies, and adds
-the ones that matter to work. Bridge never selects an approval bypass to
-make a headless call succeed, and it selects no permission posture of its
-own either: the work vectors pass no policy flag that would replace the
-tool's effective configured posture (Codex passes no `--sandbox`, MiniMax no
-`--permission`), and Bridge refuses no route on partial posture evidence —
-for Codex it reports the apparent posture read from the top of the user's
-config in a warning, because trusted-project, managed, cloud, or MDM
-policy can change what codex actually enforces, and lets codex's own
-run-time enforcement govern, so a genuinely read-only sandbox fails inside
-codex with codex's own error, surfaced with its reason and next action.
-Where a tool cannot do non-interactive
-work under ordinary permissions, Bridge reports work unsupported with the
-real diagnostic rather than quietly weakening anything. Warnings do not
-block a usable call, require approval, or store consent. Version or platform
-drift may proceed with a warning when required switches and transport still
-work. Complete confinement is not claimed: the model-provider connection and
-same-user reads remain outside it. The [interface](INTERFACE.md) details the
-individual connector limits, including surviving managed policy, and the
-per-target work and image routes.
+Review calls use each connector's strongest practical vendor safeguards
+and warn about the remaining limits; work calls use the tool's ordinary
+capabilities under its own normal permissions, keep every warning that
+still applies, and add the ones that matter to work. Bridge never selects
+an approval bypass to make a headless call succeed, and selects no
+permission posture of its own either — for Codex it reports the apparent
+posture read from the top of the user's config in a warning and lets
+codex's own run-time enforcement govern. Warnings do not block a usable
+call, require approval, or store consent.
 
-ZCode and Hermes receive the entire body as one bound command-line option,
-visible to other same-user processes or potentially to system and vendor logs.
-NUL and oversize argument bodies are refused before publication, never split
-or truncated. The other four connectors use standard input. Bridge never
-creates a private prompt file or treats a body as shell text.
-Qwen receives one internal JSON user frame containing the unchanged body, then
-end-of-input. Its stream reader avoids the text-input cutoff and the vendor's
-text-to-command-line conversion; Bridge adds no prompt argument or file.
+Transport facts worth knowing: ZCode and Hermes receive the entire body as
+one bound command-line option, visible to other same-user processes and
+potentially to system and vendor logs; NUL and oversize bodies are refused
+before publication. The other four connectors use standard input. Qwen
+Code 0.23.0 alone may preprocess recognized leading `/` commands or
+unescaped `@` references before the model (altering the effective prompt,
+appending readable file content, failing, or handling a command itself);
+its zero model-tool-call limit does not stop that preprocessing, and no
+raw switch exists. Bridge records and passes the original body unchanged
+and warns; never claim Qwen's model saw it unchanged. For Qwen, safe mode
+still loads settings and `.env` values that can bypass its sandbox or
+start a detached proxy shell; Bridge names those surviving routes as
+warnings. Claude Code's exact managed MCP source is incompatible with its
+strict-MCP review invocation and fails as a prerequisite, not a warning.
 
-Bridge clears Qwen's inherited startup-argument overrides and pins its native macOS
-sandbox selection and restrictive-open profile. Safe mode still loads settings
-and `.env` values: they can restore `SANDBOX` and bypass that sandbox, or restore
-`QWEN_SANDBOX_PROXY_COMMAND` and start a detached shell outside the sandbox and
-Bridge's process group. Empty values cannot pin those routes off. These are
-non-blocking warnings, not a claim of complete confinement.
-
-Qwen Code 0.23.0 alone may preprocess recognized leading `/` commands or
-unescaped `@` references: it may alter the effective prompt, append readable
-file or resource content, fail before a model call, or handle a command itself.
-Both headless modes share this; safe mode cannot disable it and no raw switch
-exists. Qwen runs with `--max-tool-calls=0`: no model-initiated tool call can
-execute, and the first such attempt aborts the run. Input preprocessing happens
-before that budget, so the limit does not stop it. Bridge records and passes
-the original body unchanged, warns during `check` and before publication, and
-does not claim Qwen's model sees it unchanged. The other five prompts remain
-lossless.
-
-Missing software or minimum authentication, unusable input/output, missing required
-mechanics, and an uncontrollable foreground process remain hard failures. Claude's
-exact managed MCP source is incompatible with its strict-MCP invocation: a
-prerequisite failure, distinct from the warning-only limits of other managed policy.
-
-## Optional harness adapters and full interface
-
-The six optional skill sources are [Codex](packages/codex/SKILL.md),
-[Claude](packages/claude/SKILL.md), [ZCode](packages/zcode/SKILL.md),
-[Hermes](packages/hermes/SKILL.md), [MiniMax](packages/minimax/SKILL.md), and
-[Qwen](packages/qwen/SKILL.md). Each tells its host how to use the same checkout,
-surface warnings and failures, send a body, read an answer, and record a note.
-They are not separate runtimes and never call each other. Target-only harnesses
-need no Bridge skill. These files neither install themselves nor update installed copies.
-
-[INTERFACE.md](INTERFACE.md) defines the complete Format 2 and Format 3
-command, record, readiness-JSON, lifecycle-event, warning, qualification,
-failure, and cleanup contract and release criteria, including the readable
-Format 3 record surface and the per-target work and image routes.
-Application workflows, including Programming Loop, stay with the caller.
+[INTERFACE.md](INTERFACE.md) details every connector's limits, the
+per-target work and image routes, and the release criteria.
 
 ## License
 
