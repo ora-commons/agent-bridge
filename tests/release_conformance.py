@@ -335,6 +335,7 @@ def inspect() -> None:
             "run": {
                 "--session",
                 "--timeout",
+                "--no-timeout",
                 "--max-steps",
                 "--require-model",
                 "--events-jsonl",

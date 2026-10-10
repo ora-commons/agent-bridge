@@ -2104,6 +2104,7 @@ class SixTargetConnectorBehavior(unittest.TestCase):
             session_dir="/session",
             body="Please answer.\n",
             timeout_seconds=900.0,
+            no_timeout=False,
             warning_writer=mock.ANY,
             max_steps=2,
             required_model="minimax/MiniMax-M3",
@@ -3170,6 +3171,7 @@ class CommandLineBody(unittest.TestCase):
             {
                 "--session",
                 "--timeout",
+                "--no-timeout",
                 "--max-steps",
                 "--require-model",
                 "--events-jsonl",
