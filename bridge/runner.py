@@ -287,6 +287,7 @@ def run_turn(
     purpose: Optional[str] = None,
     event_writer: Optional[EventWriter] = None,
     build_work_command: Optional[WorkCommandBuilder] = None,
+    no_timeout: bool = False,
 ) -> TurnResult:
     """Publish one request and one response for the session's fixed target."""
     try:
@@ -303,7 +304,7 @@ def run_turn(
             detail="there was no message to send on standard input",
         )
 
-    deadline = Deadline(timeout)
+    deadline = Deadline(math.inf if no_timeout else timeout)
     record = session_module.read_session(session_dir)
     has_minimax_options = max_steps is not None or required_model is not None
     if has_minimax_options and record.peer != "minimax":

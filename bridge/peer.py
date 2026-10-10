@@ -112,6 +112,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import math
 import os
 import signal
 import subprocess
@@ -214,9 +215,10 @@ _RESUME_FAILED = 0xFFFFFFFF
 class Deadline(object):
     """One deadline for a whole turn, made once and passed down.
 
-    Created at the start of a `run` and handed to every bounded step, so
+    Created at the start of a `run` and handed to every waiting step, so
     prechecks, the peer call and reading the answer all draw on the same budget
-    rather than each getting a fresh one.
+    rather than each getting a fresh one. An explicit no-timeout run uses
+    positive infinity; cleanup always keeps its separate finite grace.
 
     `heartbeat` is an optional no-result callback the bounded wait invokes
     while a program is still running, roughly once per `HEARTBEAT_SECONDS`.
@@ -1141,13 +1143,16 @@ def run_bounded(
                             wait = remaining
                         else:
                             wait = min(remaining, HEARTBEAT_SECONDS)
+                        # An explicitly unbounded run still checks in when
+                        # requested, and still cleans up on caller stop.
+                        call_timeout = None if math.isinf(wait) else wait
                         try:
                             if supplied_body:
                                 stdout, stderr = process.communicate(
-                                    input=payload, timeout=wait
+                                    input=payload, timeout=call_timeout
                                 )
                             else:
-                                stdout, stderr = process.communicate(timeout=wait)
+                                stdout, stderr = process.communicate(timeout=call_timeout)
                             break
                         except subprocess.TimeoutExpired:
                             supplied_body = False
