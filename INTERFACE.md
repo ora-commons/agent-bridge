@@ -101,7 +101,7 @@ python3 -m bridge check --peer <target-id>
                  [--mode review|work] [--json]
 
 python3 -m bridge run --session <session-directory>
-                 [--timeout <seconds>]
+                 [--timeout <seconds> | --no-timeout]
                  [--max-steps <positive-integer>]
                  [--require-model <provider/model>]
                  [--events-jsonl]
@@ -178,7 +178,7 @@ plain-text call, which reports no identity.
 In a work session, `--max-steps` is forwarded when given and omitted otherwise,
 so the review-only one-step assumption does not apply to work.
 
-`--timeout` is one deadline for prerequisites, target execution, and response capture, defaulting to 900 seconds. Cleanup has a separate bounded grace period. There is no retry.
+`--timeout` is one deadline for prerequisites, target execution, and response capture, defaulting to 900 seconds. `--no-timeout` explicitly waits until the target answers or the caller stops the run, and cannot be combined with `--timeout`. Cleanup has a separate bounded grace period. There is no retry.
 
 A courier-only project session cannot run in review mode: Bridge refuses before connector import or request publication and tells the application to include evidence in the body or choose a project-capable target. A work session runs against the connector's work vector (section 4a); a work session whose target declares work unsupported is refused the same way, with the real limitation and the terminal route in the message.
 
@@ -224,9 +224,9 @@ With `--events-jsonl`, standard output carries one JSON object per line — life
  "warnings": ["...the same warnings standard error carried..."]}
 ```
 
-A heartbeat means Bridge is alive and can report whether its child process is still running; it is not progress and carries no percentages. Heartbeats arrive while prerequisite probes or the peer call are waiting (`phase` says which), about every 30 seconds, and both bounded waits share the turn's one deadline. The final `finished` event carries `outcome` (`success`, `failure`, or `stopped`), `request_path` and `response_path` when published, the warnings, and — for `failure` — a plain `reason` and `next_action`; internal exception names stay internal. A `success` event may additionally carry `model` and `provider` when the target's own structured output reported the identity that answered — MiniMax's `--require-model` JSON mode is the one such route today — and both fields are absent when it did not, never empty strings; they state what the tool reported, never a Bridge selection. A `success` event follows durable response publication. A failed call still exits nonzero. If the event pipe breaks, the turn runs on and its records decide the truth: a broken pipe can never turn an unfinished call into a reported success.
+A heartbeat means Bridge is alive and can report whether its child process is still running; it is not progress and carries no percentages. Heartbeats arrive while prerequisite probes or the peer call are waiting (`phase` says which), about every 30 seconds. Both waits share the turn's one deadline, or its explicit `--no-timeout` choice. The final `finished` event carries `outcome` (`success`, `failure`, or `stopped`), `request_path` and `response_path` when published, the warnings, and — for `failure` — a plain `reason` and `next_action`; internal exception names stay internal. A `success` event may additionally carry `model` and `provider` when the target's own structured output reported the identity that answered — MiniMax's `--require-model` JSON mode is the one such route today — and both fields are absent when it did not, never empty strings; they state what the tool reported, never a Bridge selection. A `success` event follows durable response publication. A failed call still exits nonzero. If the event pipe breaks, the turn runs on and its records decide the truth: a broken pipe can never turn an unfinished call into a reported success.
 
-Stop signals, `--timeout`, interruption, cleanup, and the single deadline behave exactly as for any other run; there is no separate cancellation daemon or command service.
+Stop signals, `--timeout` or `--no-timeout`, interruption, and cleanup behave exactly as for any other run; there is no separate cancellation daemon or command service.
 
 ---
 

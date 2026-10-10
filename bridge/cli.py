@@ -52,10 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--json", action="store_true")
 
     run = subcommands.add_parser(
-        "run", help="perform one bounded call for an existing session"
+        "run", help="perform one call for an existing session"
     )
     run.add_argument("--session", required=True)
-    run.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    timing = run.add_mutually_exclusive_group()
+    timing.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    timing.add_argument("--no-timeout", action="store_true",
+                        help="wait for the peer until it answers or the caller stops the run")
     run.add_argument("--max-steps", type=int)
     run.add_argument("--require-model")
     run.add_argument("--events-jsonl", action="store_true")
@@ -199,6 +202,7 @@ def _run(args: argparse.Namespace) -> Optional[str]:
         session_dir=args.session,
         body=_read_body(),
         timeout_seconds=args.timeout,
+        no_timeout=args.no_timeout,
         warning_writer=lambda warning: sys.stderr.write(
             "Warning: {0}\n".format(warning)
         ),

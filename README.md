@@ -7,7 +7,7 @@ coding tool, then bring its answer back. Use it to challenge a plan, review
 work, or hand off a bounded task, with a readable record of the exchange.
 
 Agent Bridge is a standalone one-to-many Markdown courier. Any application or
-harness can use one shared checkout to make a bounded call to Codex, Claude
+harness can use one shared checkout to make a foreground call to Codex, Claude
 Code, ZCode, Hermes Agent, MiniMax Code, or Qwen Code through its official
 vendor CLI. Bridge does not connect model APIs; an ordinary caller need not
 be an agent.
@@ -17,8 +17,10 @@ be an agent.
 Bridge owns a deliberately small surface and does it reliably:
 
 - Target readiness checks with concrete warnings, without a model call.
-- One request and one response per foreground call, with a deadline
-  (900 seconds by default) and bounded cleanup. Bridge never retries.
+- One request and one response per foreground call. A caller may use the
+  default 900-second deadline, set another deadline, or explicitly wait
+  without one. Stopping a call still cleans up its owned processes; Bridge
+  never retries.
 - An ordered, human-readable Markdown record of every exchange under
   `~/.agent-bridge/sessions/`, outside Git and cloud sync.
 - Two calling modes on one runtime:
@@ -294,8 +296,10 @@ standard error — show all of it, not just the last line. Surface every
 warning without asking for acknowledgment.
 
 `run` has one deadline for prerequisites, execution, and response capture:
-900 seconds by default, overridden by `--timeout <seconds>`. Keep the
-caller attached longer than the deadline plus cleanup. A target failure
+900 seconds by default, overridden by `--timeout <seconds>`. The explicit
+`--no-timeout` option waits until the peer answers or the caller stops the run;
+it cannot be combined with `--timeout`. Keep the caller attached until the
+answer or stop and cleanup. A target failure
 after publication leaves the truthful request and invents no response. Do
 not turn an uncertain publication into success or automatically retry it.
 

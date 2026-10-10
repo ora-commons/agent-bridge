@@ -503,6 +503,149 @@ class WorkTurnBehavior(unittest.TestCase):
             response,
         )
 
+    def test_no_timeout_waits_for_a_reply_past_a_short_named_budget(self):
+        class SlowWorkConnector:
+            CAPABILITIES = connectors.Capabilities("supported", "fake", "unsupported", "no images")
+
+            @staticmethod
+            def build_work_command(deadline, cwd, **kwargs):
+                peer.run_bounded(
+                    (sys.executable, FAKE_PEER, "delay-echo", "0.15"),
+                    cwd, tuple(os.environ.items()), "Prerequisite.\n", deadline,
+                )
+                return PeerCommand(
+                    argv=(sys.executable, FAKE_PEER, "delay-echo", "0.15"),
+                    cwd=cwd, env=tuple(os.environ.items()),
+                )
+
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch.object(runner.connectors, "resolve", return_value=SlowWorkConnector), \
+                mock.patch.object(cli, "DEFAULT_TIMEOUT_SECONDS", 0.05), \
+                mock.patch.object(peer, "HEARTBEAT_SECONDS", 0.05), \
+                mock.patch("sys.stdin", io.StringIO("Wait for the answer.\n")), \
+                mock.patch("sys.stdout", output), mock.patch("sys.stderr", errors):
+            status = cli.main([
+                "run", "--session", self.session_dir, "--no-timeout", "--events-jsonl",
+            ])
+        self.assertEqual(status, 0, errors.getvalue())
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([e["event"] for e in events].count("finished"), 1)
+        self.assertEqual(events[-1]["outcome"], "success")
+        self.assertEqual(
+            {e["phase"] for e in events if e["event"] == "heartbeat"},
+            {"prerequisites", "peer-call"},
+        )
+        response = self._read(events[-1]["response_path"])
+        self.assertEqual(response.split("\n## Body\n\n", 1)[1], "Wait for the answer.\n")
+        self.assertEqual(sorted(os.listdir(session.messages_dir(self.session_dir))), [
+            "0001-initiator-to-peer.md", "0002-peer-to-initiator.md",
+        ])
+
+    def test_cli_timeout_choices_keep_finite_defaults_and_are_exclusive(self):
+        class HangingWorkConnector:
+            CAPABILITIES = connectors.Capabilities("supported", "fake", "unsupported", "no images")
+
+            @staticmethod
+            def build_work_command(deadline, cwd, **kwargs):
+                return PeerCommand(
+                    argv=(sys.executable, FAKE_PEER, "hang", "1"),
+                    cwd=cwd, env=tuple(os.environ.items()),
+                )
+
+        for options in ([], ["--timeout", "0.15"]):
+            with self.subTest(options=options):
+                output, errors = io.StringIO(), io.StringIO()
+                with mock.patch.object(runner.connectors, "resolve", return_value=HangingWorkConnector), \
+                        mock.patch.object(cli, "DEFAULT_TIMEOUT_SECONDS", 0.15), \
+                        mock.patch("sys.stdin", io.StringIO("Do not wait forever.\n")), \
+                        mock.patch("sys.stdout", output), mock.patch("sys.stderr", errors):
+                    status = cli.main([
+                        "run", "--session", self.session_dir, "--events-jsonl", *options,
+                    ])
+                self.assertEqual(status, 1)
+                events = [json.loads(line) for line in output.getvalue().splitlines()]
+                self.assertEqual(events[-1]["outcome"], "failure")
+                self.assertIn("reached its deadline", events[-1]["reason"])
+                self.assertNotIn("response_path", events[-1])
+        before = sorted(os.listdir(session.messages_dir(self.session_dir)))
+        self.assertEqual(before, ["0001-initiator-to-peer.md", "0002-initiator-to-peer.md"])
+        with mock.patch("sys.stderr", io.StringIO()) as errors:
+            status = cli.main([
+                "run", "--session", self.session_dir,
+                "--timeout", "1", "--no-timeout",
+            ])
+        self.assertEqual(status, 1)
+        self.assertIn("not allowed with argument", errors.getvalue())
+        self.assertEqual(sorted(os.listdir(session.messages_dir(self.session_dir))), before)
+
+    @unittest.skipUnless(os.name == "posix", "Uses POSIX process-group stop")
+    def test_no_timeout_stop_ends_owned_descendants_without_retry_or_answer(self):
+        # The real CLI runs in its own process, with only its connector replaced
+        # by the repository fixture. A stop during a probe precedes publication;
+        # a stop during work retains exactly one request and no invented reply.
+        source = """
+import io, os, sys
+sys.path.insert(0, sys.argv[1])
+from bridge import cli, connectors, peer, runner
+from bridge.connectors import PeerCommand
+class FakeConnector:
+    CAPABILITIES = connectors.Capabilities('supported', 'fake', 'unsupported', 'no images')
+    @staticmethod
+    def build_work_command(deadline, cwd, **kwargs):
+        argv = (sys.executable, sys.argv[2], 'write-pids-then-hang', sys.argv[4])
+        if sys.argv[5] == 'prerequisites':
+            peer.run_bounded(argv, cwd, tuple(os.environ.items()), '', deadline)
+        return PeerCommand(argv=argv, cwd=cwd, env=tuple(os.environ.items()))
+runner.connectors.resolve = lambda target: FakeConnector
+peer.HEARTBEAT_SECONDS = 0.05
+sys.stdin = io.StringIO('Start once; preserve partial work if stopped.\\n')
+sys.exit(cli.main(['run', '--session', sys.argv[3], '--no-timeout', '--events-jsonl']))
+"""
+        for phase in ("prerequisites", "peer-call"):
+            with self.subTest(phase=phase):
+                pid_path = os.path.join(self.temp, phase + "-pids.txt")
+                driver = subprocess.Popen(
+                    [sys.executable, "-c", source, REPO_ROOT, FAKE_PEER,
+                     self.session_dir, pid_path, phase],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True,
+                )
+                try:
+                    pids = _await_reported_pids(pid_path)
+                    driver.terminate()
+                    output, errors = driver.communicate(timeout=10.0)
+                    self.assertEqual(driver.returncode, 1, errors)
+                    events = [json.loads(line) for line in output.splitlines()]
+                    self.assertEqual([e["event"] for e in events].count("finished"), 1)
+                    self.assertEqual(events[-1]["outcome"], "stopped")
+                    self.assertNotIn("response_path", events[-1])
+                    for pid in pids.values():
+                        self.assertTrue(_wait_until_gone(pid), "Owned process survived Stop")
+                    self.assertEqual(sorted(os.listdir(session.messages_dir(self.session_dir))),
+                                     [] if phase == "prerequisites" else ["0001-initiator-to-peer.md"])
+                    with locking.session_lock(self.session_dir):
+                        pass
+                finally:
+                    # Even an assertion failure must clean up this fixture's
+                    # exact processes; no background test worker survives.
+                    if driver.poll() is None:
+                        driver.terminate()
+                        try:
+                            driver.wait(timeout=10.0)
+                        except subprocess.TimeoutExpired:
+                            driver.kill()
+                            driver.wait(timeout=10.0)
+                    if os.path.exists(pid_path):
+                        with open(pid_path, encoding="utf-8") as stream:
+                            owned = dict((name, int(pid)) for name, pid in PID_LINE.findall(stream.read()))
+                        if "PEER" in owned:
+                            try:
+                                os.killpg(owned["PEER"], signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                    driver.stdout.close()
+                    driver.stderr.close()
+
     def test_lifecycle_events_order_heartbeats_before_one_final_result(self):
         events = []
         with mock.patch.object(peer, "HEARTBEAT_SECONDS", 0.05):
