@@ -1147,13 +1147,17 @@ class ReadinessAndSupport(unittest.TestCase):
             {
                 "peer": "codex",
                 "mode": "work",
+                "bridge_version": cli.VERSION,
                 "ready": True,
+                "command_present": True,
                 "executable": "/fake/peer",
                 "version": "9.9.9",
                 "platform": "Darwin 26 arm64",
                 "authentication": "unknown",
+                "review": "supported",
                 "work": "supported",
                 "image": "unknown",
+                "compatibility": "unknown",
                 "warnings": ["one warning"],
             },
         )
@@ -1174,6 +1178,22 @@ class ReadinessAndSupport(unittest.TestCase):
         self.assertEqual(result["authentication"], "confirmed")
         self.assertEqual(result["mode"], "review")
 
+        class QualifiedConnector(ConfirmedConnector):
+            @staticmethod
+            def check(deadline, cwd, mode="review"):
+                return connectors.CheckResult(
+                    "confirmed",
+                    (),
+                    executable="/fake/peer",
+                    version="9.9.9",
+                    platform="Darwin 26 arm64",
+                    authentication_confirmed=True,
+                    qualified=True,
+                )
+
+        _status, result = self._check_json("codex", "review", QualifiedConnector)
+        self.assertEqual(result["compatibility"], "supported")
+
         class UnauthenticatedConnector:
             CAPABILITIES = UnknownAuthConnector.CAPABILITIES
 
@@ -1189,6 +1209,55 @@ class ReadinessAndSupport(unittest.TestCase):
         self.assertEqual(result["authentication"], "required")
         self.assertIn("login status exited 1", result["reason"])
         self.assertTrue(result["next_action"])
+        # A failed login erases neither the command nor the implemented
+        # capabilities; only the compatibility of this combination, which the
+        # failed check never established, stays unset (null).
+        self.assertEqual(result["command_present"], True)
+        self.assertEqual(result["review"], "supported")
+        self.assertEqual(result["work"], "supported")
+        self.assertEqual(result["image"], "unknown")
+        self.assertIsNone(result["compatibility"])
+
+        class MissingConnector:
+            CAPABILITIES = UnknownAuthConnector.CAPABILITIES
+
+            @staticmethod
+            def check(deadline, cwd, mode="review"):
+                raise BridgeError(Failure.MISSING_CLI, detail="codex")
+
+        status, result = self._check_json("codex", "review", MissingConnector)
+        self.assertEqual(status, 1)
+        self.assertEqual(result["ready"], False)
+        self.assertEqual(result["command_present"], False)
+        self.assertEqual(result["review"], "supported")
+        self.assertEqual(result["work"], "supported")
+
+        class UnsupportedWorkConnector:
+            CAPABILITIES = connectors.Capabilities(
+                work="unsupported",
+                work_detail="terminal route: run it yourself",
+                image="unknown",
+                image_detail="no evidence either way",
+            )
+
+            @staticmethod
+            def check(deadline, cwd, mode="review"):
+                return connectors.CheckResult(
+                    "unconfirmed",
+                    (),
+                    executable="/fake/peer",
+                    version="9.9.9",
+                    platform="Darwin 26 arm64",
+                    authentication_confirmed=False,
+                    qualified=True,
+                )
+
+        status, result = self._check_json(
+            "hermes", "work", UnsupportedWorkConnector
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(result["compatibility"], "unsupported")
+        self.assertIn("terminal route", result["warnings"][-1])
 
     def test_unsupported_work_routes_are_refused_with_the_real_reason(self):
         for connector, peer_id in ((hermes, "hermes"), (qwen, "qwen")):

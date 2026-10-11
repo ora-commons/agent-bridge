@@ -135,21 +135,27 @@ It runs in a task-owned neutral directory and never touches a real project, inst
 `--json` replaces the prose with exactly one JSON object on standard output, one line, no schema version. Success and failure alike produce one object; a failure still exits nonzero.
 
 ```json
-{"peer": "codex", "mode": "work", "ready": true,
+{"peer": "codex", "mode": "work", "bridge_version": "1.2.0", "ready": true,
+ "command_present": true,
  "executable": "/usr/local/bin/codex", "version": "0.155.1",
  "platform": "Darwin 26 arm64",
  "authentication": "confirmed",
- "work": "supported", "image": "supported",
+ "review": "supported", "work": "supported", "image": "supported",
+ "compatibility": "supported",
  "warnings": ["...one concrete warning per line..."]}
 ```
 
 | Field | Values and meaning |
 |---|---|
 | `peer`, `mode` | The selected target and the posture checked (`review` or `work`). |
+| `bridge_version` | Version of the Bridge copy that produced this object. |
+| `command_present` | Whether the target's local command was found. `false` only when the CLI is absent; any other failure implies the program was found. |
 | `ready` | Whether the selected mode's call mechanics are usable now. A successful local check does not prove the selected model will answer or that every future permission is available. |
 | `executable`, `version`, `platform` | Observed facts about the installed program, or `null` when a failure happened before they could be read. |
 | `authentication` | `confirmed` (the CLI reported a sign-in), `required` (the CLI reported none; the object carries the reason), or `unknown` (this CLI offers no safe no-turn check; unknown is not failure when the route is usable). |
+| `review` | The implemented analytical action, `supported` for every connector. Present on failure paths too, so a failed sign-in does not erase implemented capabilities. |
 | `work`, `image` | `supported` (a route is implemented and its switches verified present), `unsupported` (a genuine vendor limitation, named in `warnings` with the terminal route), or `unknown`. Supported means transport support; whether the model accepted a live work call or image is stated in `warnings`, which distinguish verified evidence from unverified acceptance. |
+| `compatibility` | `supported` (observed executable version and platform are inside the connector's exercised release evidence), `unknown` (outside that evidence, or nothing established it — a newer or legacy version is never auto-unsupported), `unsupported` (a work-mode check of a target whose work route is unsupported), or `null` when a failure prevented establishing it. |
 | `warnings` | The same concrete non-blocking warnings the prose interface prints, plus the capability-detail sentence for any `unsupported` value. |
 | `reason`, `next_action` | Present when `ready` is false: what happened and the one useful next action. |
 

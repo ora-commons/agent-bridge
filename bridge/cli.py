@@ -20,7 +20,7 @@ import sys
 import tempfile
 from typing import Iterator, Optional, Sequence, Tuple
 
-from . import connectors, record as record_module, runner
+from . import VERSION, connectors, record as record_module, runner
 from .errors import BridgeError, Failure, guidance
 from .peer import READINESS_TIMEOUT_SECONDS, Deadline, SignalStop
 
@@ -155,24 +155,37 @@ def _check(args: argparse.Namespace) -> connectors.CheckResult:
 def _check_json(args: argparse.Namespace) -> int:
     """One machine-readable readiness result, success or failure alike.
 
-    The object carries the selected peer and mode, usability, the
-    executable/version/platform facts, tri-state authentication and work/image
-    capability, and warnings. It deliberately names no schema version: the
-    field set is the contract. A hard failure still exits nonzero, with the
-    reason and next action inside the object rather than on standard error.
+    The object carries the selected peer and mode, usability, the identity and
+    version of this loaded Bridge copy, whether the local command is present,
+    the executable/version/platform facts, tri-state authentication, the
+    connector's implemented review/work/image actions, the compatibility of
+    the loaded combination, and warnings. The implemented actions are source
+    facts of the connector, so a failed login or a missing command does not
+    erase them. `compatibility` is `supported` when the installed version and
+    platform are inside the connector's exercised release evidence, and
+    `unknown` when they are outside it or nothing established either way;
+    `unsupported` means the requested action is an implemented-but-refused
+    route such as work for a courier-only target. A hard failure still exits
+    nonzero, with the reason and next action inside the object rather than on
+    standard error, and `compatibility` null because it was not established.
+    It deliberately names no schema version: the field set is the contract.
     """
     mode = args.mode or "review"
     result = {
         "peer": args.peer,
         "mode": mode,
+        "bridge_version": VERSION,
         "ready": False,
         "warnings": [],
     }  # type: dict
+    checked = None  # type: Optional[connectors.CheckResult]
+    known_connector = True
     try:
         checked = _check(args)
         result.update(
             {
                 "ready": True,
+                "command_present": True,
                 "executable": checked.executable,
                 "version": checked.version,
                 "platform": checked.platform,
@@ -183,14 +196,6 @@ def _check_json(args: argparse.Namespace) -> int:
                 ),
             }
         )
-        capability = connectors.resolve(args.peer).CAPABILITIES
-        result["work"] = capability.work
-        result["image"] = capability.image
-        result["warnings"] = list(checked.warnings)
-        if capability.work == "unsupported":
-            result["warnings"].append(capability.work_detail)
-        if capability.image == "unsupported":
-            result["warnings"].append(capability.image_detail)
     except BridgeError as error:
         reason, next_action = guidance(error.failure)
         if error.detail:
@@ -199,6 +204,30 @@ def _check_json(args: argparse.Namespace) -> int:
         result["next_action"] = next_action
         if error.failure == Failure.AUTHENTICATION_REQUIRED:
             result["authentication"] = "required"
+        known_connector = error.failure != Failure.UNKNOWN_HARNESS
+        if known_connector:
+            # The command was found whenever the check got past resolving the
+            # program to run; only MISSING_CLI says it was not.
+            result["command_present"] = error.failure != Failure.MISSING_CLI
+    if known_connector:
+        capability = connectors.resolve(args.peer).CAPABILITIES
+        result["review"] = "supported"
+        result["work"] = capability.work
+        result["image"] = capability.image
+        if checked is not None:
+            result["warnings"] = list(checked.warnings)
+        if capability.work == "unsupported":
+            result["warnings"].append(capability.work_detail)
+        if capability.image == "unsupported":
+            result["warnings"].append(capability.image_detail)
+        if mode == "work" and capability.work == "unsupported":
+            result["compatibility"] = "unsupported"
+        elif checked is None:
+            result["compatibility"] = None
+        elif checked.qualified:
+            result["compatibility"] = "supported"
+        else:
+            result["compatibility"] = "unknown"
     sys.stdout.write(json.dumps(result, ensure_ascii=True) + "\n")
     return 0 if result["ready"] else 1
 
