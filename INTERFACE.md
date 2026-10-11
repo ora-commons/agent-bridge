@@ -135,7 +135,7 @@ It runs in a task-owned neutral directory and never touches a real project, inst
 `--json` replaces the prose with exactly one JSON object on standard output, one line, no schema version. Success and failure alike produce one object; a failure still exits nonzero.
 
 ```json
-{"peer": "codex", "mode": "work", "bridge_version": "1.3.0", "ready": true,
+{"peer": "codex", "mode": "work", "bridge_version": "1.3.1", "ready": true,
  "command_present": true,
  "executable": "/usr/local/bin/codex", "version": "0.155.1",
  "platform": "Darwin 26 arm64",

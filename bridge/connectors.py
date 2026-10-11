@@ -247,15 +247,21 @@ def argument_space_used(
     argv: Sequence[str], env: Iterable[Tuple[str, str]]
 ) -> int:
     """The bytes a process creation would spend on these arguments and this
-    environment: every string with its terminator, and a pointer for each."""
+    environment: every string with its terminator, and a pointer for each.
+
+    Every string is measured with `os.fsencode`, the platform's filesystem
+    encoding with surrogate escaping - the same conversion process creation
+    itself performs - so a real environment carrying undecodable bytes is
+    counted in the bytes the kernel would see rather than refused.
+    """
     pointer = 8
     used = 0
     count = 0
     for argument in argv:
-        used += len(argument.encode("utf-8")) + 1
+        used += len(os.fsencode(argument)) + 1
         count += 1
     for name, value in env:
-        used += len(name.encode("utf-8")) + len(value.encode("utf-8")) + 2
+        used += len(os.fsencode(name)) + len(os.fsencode(value)) + 2
         count += 1
     return used + pointer * (count + 2)
 
