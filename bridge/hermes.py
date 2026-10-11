@@ -93,9 +93,10 @@ own sign-in and settings where it always does.
 
 Each `-z` run is a fresh session; `--resume` and `--continue` are ignored
 beside it and never passed. Nothing daemonizes - the process group was empty
-after every probe - and there is no wall-clock limit of its own, so the turn's
-deadline and cleanup are the only bound. Only the final answer goes to standard
-output; everything else Hermes has to say goes to the error stream or nowhere.
+after every probe - and there is no wall-clock limit of its own, so the
+caller's stop and cleanup are the only bound. Only the final answer goes to
+standard output; everything else Hermes has to say goes to the error stream or
+nowhere.
 
 **What readiness costs.** Nothing. Four cheap questions, no model turn among
 them: where the program is, `hermes --version`, `hermes portal info`, and
@@ -304,9 +305,10 @@ def check(
 def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
     """The fixed argument vector for one turn, prerequisites confirmed first.
 
-    The runner calls this inside the turn's own deadline, which is why the
-    prerequisites are repeated here rather than trusted from an earlier
-    readiness check: readiness may have been established days ago, or never.
+    The runner calls this inside the turn's readiness bound - the work
+    itself carries no deadline - which is why the prerequisites are
+    repeated here rather than trusted from an earlier readiness check:
+    readiness may have been established days ago, or never.
 
     `cwd` is always the neutral empty directory a turn without a project gets,
     because this connector is courier-only and the command line refuses

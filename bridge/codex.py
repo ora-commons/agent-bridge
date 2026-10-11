@@ -393,7 +393,7 @@ def check(
 def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
     """The fixed argument vector for one turn, prerequisites confirmed first.
 
-    The runner calls this inside the turn's own deadline, which is why the
+    The runner calls this inside the turn's readiness bound, which is why the
     prerequisites are repeated here rather than trusted from an earlier
     readiness check: readiness may have been established days ago, or never.
 

@@ -17,10 +17,11 @@ be an agent.
 Bridge owns a deliberately small surface and does it reliably:
 
 - Target readiness checks with concrete warnings, without a model call.
-- One request and one response per foreground call. A caller may use the
-  default 900-second deadline, set another deadline, or explicitly wait
-  without one. Stopping a call still cleans up its owned processes; Bridge
-  never retries.
+- One request and one response per foreground call. Ordinary work has no
+  elapsed-time deadline: Bridge waits until the target answers or the caller
+  stops the run, and a caller may instead name a bounded wait that returns
+  control without stopping the target. Stopping a call still cleans up its
+  owned processes; Bridge never retries.
 - An ordered, human-readable Markdown record of every exchange under
   `~/.agent-bridge/sessions/`, outside Git and cloud sync.
 - Two calling modes on one runtime:
@@ -295,11 +296,17 @@ error. Any failure exits nonzero with a reason and one next action on
 standard error — show all of it, not just the last line. Surface every
 warning without asking for acknowledgment.
 
-`run` has one deadline for prerequisites, execution, and response capture:
-900 seconds by default, overridden by `--timeout <seconds>`. The explicit
-`--no-timeout` option waits until the peer answers or the caller stops the run;
-it cannot be combined with `--timeout`. Keep the caller attached until the
-answer or stop and cleanup. A target failure
+`run` has no deadline for ordinary work: it waits until the peer answers, the
+peer fails, or the caller stops the run. Readiness checks keep a bounded
+deadline of their own. `--timeout <seconds>` names a bounded wait instead of a
+kill: when the wait ends, the command returns control, leaves the peer running,
+and reports the retained evidence — the session and published request, the
+peer's process and any session reference it printed, and sanitized partial
+output. On Windows a retained or detached target ends when the owning Bridge
+process exits; macOS and Linux are unaffected. The explicit `--no-timeout`
+option is the default behavior and cannot
+be combined with `--timeout`. Keep the caller attached until the answer or stop
+and cleanup. A target failure
 after publication leaves the truthful request and invents no response. Do
 not turn an uncertain publication into success or automatically retry it.
 

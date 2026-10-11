@@ -18,11 +18,11 @@ import json
 import shutil
 import sys
 import tempfile
-from typing import Iterator, Optional, Sequence
+from typing import Iterator, Optional, Sequence, Tuple
 
 from . import connectors, record as record_module, runner
 from .errors import BridgeError, Failure, guidance
-from .peer import DEFAULT_TIMEOUT_SECONDS, Deadline, SignalStop
+from .peer import READINESS_TIMEOUT_SECONDS, Deadline, SignalStop
 
 PROGRAM = "agent-bridge"
 NEUTRAL_PREFIX = "agent-bridge-neutral-"
@@ -56,9 +56,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--session", required=True)
     timing = run.add_mutually_exclusive_group()
-    timing.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    timing.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="return control after this many seconds of waiting, without "
+             "stopping the peer; the run reports where the work continues",
+    )
     timing.add_argument("--no-timeout", action="store_true",
-                        help="wait for the peer until it answers or the caller stops the run")
+                        help="wait until the peer answers or the caller stops "
+                             "the run (the default; kept for compatibility)")
     run.add_argument("--max-steps", type=int)
     run.add_argument("--require-model")
     run.add_argument("--events-jsonl", action="store_true")
@@ -139,8 +146,10 @@ def _check(args: argparse.Namespace) -> connectors.CheckResult:
     mode = args.mode or "review"
     with _check_directory() as cwd:
         if mode == "work":
-            return connector.check(Deadline(DEFAULT_TIMEOUT_SECONDS), cwd, mode="work")
-        return connector.check(Deadline(DEFAULT_TIMEOUT_SECONDS), cwd)
+            return connector.check(
+                Deadline(READINESS_TIMEOUT_SECONDS), cwd, mode="work"
+            )
+        return connector.check(Deadline(READINESS_TIMEOUT_SECONDS), cwd)
 
 
 def _check_json(args: argparse.Namespace) -> int:
@@ -194,14 +203,18 @@ def _check_json(args: argparse.Namespace) -> int:
     return 0 if result["ready"] else 1
 
 
-def _run(args: argparse.Namespace) -> Optional[str]:
+def _run(args: argparse.Namespace) -> Tuple[int, Optional[str]]:
+    """One turn. On a bounded wait's expiry, exit nonzero having returned
+    control without stopping the peer: the report names the session, the
+    retained request, the peer's process and any session reference, the
+    sanitized partial output, and where the captured output lives on."""
     event_writer = None
     if args.events_jsonl:
         event_writer = _write_stdout
     result = runner.run_turn(
         session_dir=args.session,
         body=_read_body(),
-        timeout_seconds=args.timeout,
+        wait_seconds=args.timeout,
         no_timeout=args.no_timeout,
         warning_writer=lambda warning: sys.stderr.write(
             "Warning: {0}\n".format(warning)
@@ -213,11 +226,18 @@ def _run(args: argparse.Namespace) -> Optional[str]:
         purpose=args.purpose,
         event_writer=event_writer,
     )
-    if args.events_jsonl:
-        # The finished event already carried the response path; the line a
-        # flag-free run prints would only duplicate it on the event stream.
-        return None
-    return result.response_path
+    if not isinstance(result, runner.PendingTurn):
+        if args.events_jsonl:
+            # The finished event already carried the response path; the line a
+            # flag-free run prints would only duplicate it on the event stream.
+            return 0, None
+        return 0, result.response_path
+    evidence = result.detach()
+    if not args.events_jsonl:
+        sys.stderr.write(
+            runner.render_pending(evidence, args.timeout) + "\n"
+        )
+    return 1, None
 
 
 def _record(args: argparse.Namespace) -> str:
@@ -250,9 +270,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 sys.stdout.write("Warning: {0}\n".format(warning))
             return 0
         elif args.command == "run":
-            written = _run(args)
+            status, written = _run(args)
         else:
             written = _record(args)
+            status = 0
     except SignalStop as stopped:
         sys.stderr.write(str(stopped) + "\n")
         return 1
@@ -261,4 +282,4 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     if written is not None:
         _write_stdout(written + "\n")
-    return 0
+    return status

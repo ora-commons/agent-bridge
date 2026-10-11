@@ -106,9 +106,13 @@ _GUIDANCE: Dict[Failure, Tuple[str, str]] = {
         "session was changed.",
     ),
     Failure.TIMEOUT: (
-        "The turn reached its deadline before the peer produced an answer.",
-        "Inspect the visible session and target state before deciding whether "
-        "to retry with a longer --timeout.",
+        "A bounded readiness check or a caller's bounded wait ended before "
+        "the peer produced an answer; the work itself has no deadline and a "
+        "wait never stopped it.",
+        "Inspect the retained session evidence named in the detail - the "
+        "request, any captured partial output, and the peer session "
+        "reference - then collect the answer or run the turn again when "
+        "you can wait for it.",
     ),
     Failure.PEER_FAILURE: (
         "The peer harness's program exited with a failure.",

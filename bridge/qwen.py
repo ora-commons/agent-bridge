@@ -271,17 +271,18 @@ def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
     program, _version, _described, _account, warnings = _prerequisites(
         deadline, cwd
     )
-    # Qwen's timer starts only after this process starts. Giving it the
-    # original public duration, rounded up to the integral duration its CLI
-    # accepts, means Bridge's already-running deadline always remains the
+    # Qwen's timer starts only after this process starts. It is keyed to the
+    # work bound, never the readiness bound, so an ordinary turn - whose work
+    # has no deadline - passes no native kill at all, and a bounded vector
+    # hands Qwen the rounded-up duration so Bridge's bound stays the
     # authoritative one.
     native_wall_time = (
         (
             "--max-wall-time={0}s".format(
-                max(1, int(math.ceil(deadline.seconds)))
+                max(1, int(math.ceil(deadline.work_seconds)))
             ),
         )
-        if deadline.seconds <= MAX_NATIVE_WALL_TIME_SECONDS
+        if deadline.work_seconds <= MAX_NATIVE_WALL_TIME_SECONDS
         else ()
     )
     return connectors.PeerCommand(
