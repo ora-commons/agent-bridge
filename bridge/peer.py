@@ -1,9 +1,13 @@
 """Starting one program, waiting for one answer, and leaving nothing behind.
 
-Everything Agent Bridge starts is started here, the same way, under the same
-deadline, and cleaned up the same way. There is one function worth
-understanding, `run_bounded`, and the care in it is all about two questions:
-what may be started, and what must be gone afterwards.
+Everything Agent Bridge starts is started here, the same way, and cleaned up
+the same way. There is one function worth understanding for the programs a
+turn asks questions of, `run_bounded`, and one construct for the AI work
+itself, `start_call`: the first bounds a probe with a deadline because a
+readiness question is not work, and the second starts a peer whose waits
+never kill it, so that returning control and abandoning the work are two
+different acts. The care in both is about two questions: what may be
+started, and what must be gone afterwards.
 
 **What may be started.** A fixed list of arguments, with no shell anywhere. The
 outgoing Markdown goes down the program's standard input, or, for the one kind
@@ -52,11 +56,16 @@ Windows machine was available to exercise the Windows branches live - they
 are covered by the unit checks with the Windows primitives simulated, and
 that limit is stated rather than hidden.
 
-**What ends the waiting.** Three things can: the program answers, the deadline
-passes, or somebody stops Agent Bridge - with an interrupt from the keyboard, or
-with a termination or hangup signal. All three become exceptions, so all three
-leave by the same route and the same cleanup runs. The signal handlers are put
-back exactly as they were found on the way out.
+**What ends the waiting.** For a bounded probe (`run_bounded`): the program
+answers, the deadline passes, or somebody stops Agent Bridge. For AI work
+(`start_call`): the peer answers, or somebody stops the run - there is no
+elapsed-time deadline at all, and a bounded wait that runs out merely returns
+control with the peer still running, its result still collectable by the
+process that owns it. All of these become exceptions or explicit returns, so
+they all leave by routes whose cleanup runs. The signal handlers are put back
+exactly as they were found on the way out, and a stop deferred while a
+`PeerCall` is between waits is raised at the next one - deferral changes when
+a stop is raised, never whether.
 
 **When a stop raises, and when it waits.** Raising where it lands is right for
 exactly one stretch of a turn - the wait for the program's answer - and wrong
@@ -112,17 +121,29 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import math
 import os
 import signal
 import subprocess
+import tempfile
 import time
-from typing import Callable, Iterable, Iterator, NamedTuple, Optional, Sequence, Tuple
+from typing import (
+    Callable,
+    Iterable,
+    Iterator,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from .errors import BridgeError, Failure
 
-#: The default whole-turn deadline, in seconds, when a caller names none.
-DEFAULT_TIMEOUT_SECONDS = 900.0
+#: The bound on a readiness check: the cheap version, sign-in and switch
+#: questions a connector asks before any work starts. It is not a deadline on
+#: the work itself - ordinary AI work has none - and it is the only default
+#: bound this module names.
+READINESS_TIMEOUT_SECONDS = 120.0
 
 #: How long a polite termination is given to empty the process group. Bounded
 #: separately from the call deadline, which may already have run out.
@@ -136,10 +157,16 @@ ESCALATION_GRACE_SECONDS = 5.0
 POLL_SECONDS = 0.02
 
 #: How often a bounded call reports that it is still waiting, in seconds. The
-#: report is a check-in, not progress: it says the caller's own deadline is
-#: still running and whether the child process is still alive, and nothing
-#: about the model. A turn that wants no reports leaves the hook unset.
+#: report is a check-in, not progress: it says the caller's own wait is still
+#: running and whether the child process is still alive, and nothing about
+#: the model. A turn that wants no reports leaves the hook unset.
 HEARTBEAT_SECONDS = 30.0
+
+#: The prefix of the temporary files a started peer reads its body from and
+#: captures its output streams into. Files rather than pipes, so a bounded
+#: wait can read the progress a still-running peer has made without stealing
+#: bytes from the final result, and so no read can ever block the wait.
+PEER_FILE_PREFIX = "agent-bridge-peer-"
 
 #: Whether the process-group twins below run their Windows branches, decided
 #: from the operating system at import time. The unit checks simulate the
@@ -213,12 +240,20 @@ _RESUME_FAILED = 0xFFFFFFFF
 
 
 class Deadline(object):
-    """One deadline for a whole turn, made once and passed down.
+    """One bound for a turn's non-work steps, made once and passed down.
+
+    `seconds` bounds the readiness questions a connector asks - version,
+    sign-in, switch probes - which are not AI work and may be ended when they
+    overrun. `work_seconds` names the bound on the work itself, and it is
+    infinite in every turn the runner starts: no arbitrary elapsed-time
+    cutoff may kill a healthy task, so a connector that can pass a native
+    elapsed-time switch reads `work_seconds`, never `seconds`, to decide
+    whether the child gets one at all.
 
     Created at the start of a `run` and handed to every waiting step, so
-    prechecks, the peer call and reading the answer all draw on the same budget
-    rather than each getting a fresh one. An explicit no-timeout run uses
-    positive infinity; cleanup always keeps its separate finite grace.
+    prechecks and probes draw on one budget rather than each getting a fresh
+    one. An explicit no-timeout run uses positive infinity; cleanup always
+    keeps its separate finite grace.
 
     `heartbeat` is an optional no-result callback the bounded wait invokes
     while a program is still running, roughly once per `HEARTBEAT_SECONDS`.
@@ -229,8 +264,11 @@ class Deadline(object):
     command that has not asked for check-ins.
     """
 
-    def __init__(self, seconds: float) -> None:
+    def __init__(self, seconds: float, work_seconds: Optional[float] = None) -> None:
         self.seconds = float(seconds)
+        self.work_seconds = float(
+            seconds if work_seconds is None else work_seconds
+        )
         self._started = time.monotonic()
         self.heartbeat = None  # type: Optional[Callable[[float, bool], None]]
 
@@ -1015,6 +1053,243 @@ def _cleanup_group(
     )
 
 
+class PeerCall(object):
+    """One started peer program, owned, whose waits never kill it.
+
+    The body the peer reads and the streams it writes live in temporary
+    files rather than pipes, so reading the progress a still-running peer
+    has made - which is the only account of what a bounded wait returned
+    control from - never steals bytes from the final result and never
+    blocks. `wait` ends when the peer does, when its named bound runs out
+    (leaving the peer running), or when somebody stops the run; `outcome` is
+    the complete captured result once the peer has finished.
+    """
+
+    def __init__(self, process, pgid, job, watch, started, paths):
+        self._process = process
+        self._pgid = pgid
+        self._job = job
+        self._watch = watch
+        self._started = started
+        self.paths = paths
+        self.retained = False
+
+    @property
+    def pid(self) -> int:
+        return self._process.pid
+
+    def running(self) -> bool:
+        return self._process.poll() is None
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self._started
+
+    def _read(self, index: int) -> str:
+        try:
+            with open(self.paths[index], "rb") as stream:
+                return stream.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
+
+    def output(self) -> Tuple[str, str]:
+        """Everything the peer has said so far; complete once it has finished."""
+        return self._read(1), self._read(2)
+
+    def wait(
+        self,
+        seconds: Optional[float] = None,
+        heartbeat: Optional[Callable[[float, bool], None]] = None,
+    ) -> bool:
+        """Wait for the peer to finish.
+
+        True when the peer has exited. False only when a named bounded wait
+        ran out first, with the peer still running and nothing cleaned up:
+        the caller keeps the means to wait again, collect the outcome, or
+        stop the run. A stop raises where it lands, exactly as in
+        `run_bounded`.
+        """
+        limit = (
+            None if seconds is None else time.monotonic() + max(0.0, float(seconds))
+        )
+        with self._watch.allowing():
+            while True:
+                if self._process.poll() is not None:
+                    return True
+                now = time.monotonic()
+                if limit is not None and now >= limit:
+                    return False
+                slice_seconds = (
+                    HEARTBEAT_SECONDS if heartbeat is not None else None
+                )
+                if limit is not None:
+                    remaining = limit - now
+                    slice_seconds = (
+                        remaining
+                        if slice_seconds is None
+                        else min(slice_seconds, remaining)
+                    )
+                try:
+                    self._process.wait(timeout=slice_seconds)
+                except subprocess.TimeoutExpired:
+                    pass
+                if (
+                    heartbeat is not None
+                    and self._process.poll() is None
+                    and (limit is None or time.monotonic() < limit)
+                ):
+                    heartbeat(self.elapsed(), self._process.poll() is None)
+
+    def outcome(self) -> CompletedCall:
+        """The return code and the complete captured output of a finished peer."""
+        stdout, stderr = self.output()
+        return CompletedCall(
+            returncode=self._process.returncode, stdout=stdout, stderr=stderr
+        )
+
+    def retain(self) -> None:
+        """Leave this peer running and its capture files in place when the
+        caller returns control without stopping the work."""
+        self.retained = True
+
+
+def _remove_files(paths: Sequence[str]) -> None:
+    for path in paths:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+@contextlib.contextmanager
+def start_call(
+    argv: Sequence[str],
+    cwd: str,
+    env: Iterable[Tuple[str, str]],
+    stdin_text: str,
+    spawn_failure: Failure = Failure.MISSING_CLI,
+) -> Iterator[PeerCall]:
+    """Start one peer program under this module's ownership, without a deadline.
+
+    The spawn, group ownership and stop discipline are exactly `run_bounded`'s;
+    the difference is what ends the waiting. Nothing here kills the program on
+    a clock: the caller's bounded waits return control with the peer running,
+    and the group is emptied only when the caller finishes with the call -
+    normally, by cancellation, or by a stop - or never, after `retain()`, which
+    is the deliberate release of a peer a caller chose to leave working.
+    """
+    payload = stdin_text.encode("utf-8")
+    paths = []  # type: List[str]
+    for suffix in (".in", ".out", ".err"):
+        handle, path = tempfile.mkstemp(prefix=PEER_FILE_PREFIX, suffix=suffix)
+        os.close(handle)
+        paths.append(path)
+    process = None  # type: Optional[subprocess.Popen]
+    pgid = None  # type: Optional[int]
+    job = None  # type: Optional[int]
+    call = None  # type: Optional[PeerCall]
+    with stopped_by_signal() as watch:
+        with watch.deferring():
+            try:
+                try:
+                    with open(paths[0], "wb") as stream:
+                        stream.write(payload)
+                    handles = [
+                        os.open(paths[0], os.O_RDONLY),
+                        os.open(paths[1], os.O_WRONLY),
+                        os.open(paths[2], os.O_WRONLY),
+                    ]
+                except OSError as exc:
+                    raise BridgeError(spawn_failure, detail=str(exc))
+                spawn = {
+                    "stdin": handles[0],
+                    "stdout": handles[1],
+                    "stderr": handles[2],
+                    "shell": False,
+                    "close_fds": True,
+                }
+                if WINDOWS:
+                    spawn["creationflags"] = (
+                        _CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED
+                    )
+                else:
+                    spawn["start_new_session"] = True
+                try:
+                    try:
+                        process = subprocess.Popen(
+                            list(argv),
+                            cwd=cwd,
+                            env=dict(env),
+                            **spawn
+                        )
+                    except OSError as exc:
+                        # The one refusal that is about the call rather than the
+                        # program: the kernel would not build an argument block
+                        # this large. It is the transport's failure and is named
+                        # as such, not as a missing program or a failed peer.
+                        if exc.errno == errno.E2BIG:
+                            raise BridgeError(
+                                Failure.USAGE_ERROR,
+                                detail=(
+                                    "the operating system refused to start {0} "
+                                    "because its argument list and environment "
+                                    "together were too long ({1}); send a "
+                                    "shorter message, or use a peer that reads "
+                                    "standard input".format(argv[0], exc)
+                                ),
+                            )
+                        raise BridgeError(spawn_failure, detail=str(exc))
+                    finally:
+                        for handle in handles:
+                            os.close(handle)
+                except BaseException:
+                    _remove_files(paths)
+                    raise
+                pgid = _own_group(process)
+                if WINDOWS:
+                    # Ownership is established before execution, as in
+                    # `run_bounded`; a platform that refuses the job or the
+                    # resume refuses the turn, and what was started has never
+                    # run.
+                    try:
+                        job = _windows_own_tree(process)
+                        _windows_resume_root(process)
+                    except BridgeError:
+                        _windows_end_root(process)
+                        if job is not None:
+                            _windows_release_job(job)
+                        _reap(process, ESCALATION_GRACE_SECONDS)
+                        pgid = None
+                        job = None
+                        raise
+                call = PeerCall(
+                    process, pgid, job, watch, time.monotonic(), tuple(paths)
+                )
+                yield call
+            finally:
+                if process is not None:
+                    try:
+                        if call is None or not call.retained:
+                            # Still deferred, so a second stop cannot abandon
+                            # this half done, and the ownership checks below
+                            # are the same ones `run_bounded` makes.
+                            if pgid is not None:
+                                _cleanup_group(process, pgid, job)
+                    finally:
+                        _close_streams(process)
+                        if call is None or not call.retained:
+                            _remove_files(paths)
+                        else:
+                            # A retained peer keeps its captured output for a
+                            # person to inspect; the body file it read is the
+                            # request already published in the session, so it
+                            # goes.
+                            _remove_files(paths[:1])
+        # Nothing this turn started is left, unless it was deliberately
+        # retained, so a stop that arrived while it was being deferred can be
+        # raised now without leaving anything behind.
+        watch.raise_if_stopped()
+
+
 def run_bounded(
     argv: Sequence[str],
     cwd: str,
@@ -1023,7 +1298,12 @@ def run_bounded(
     deadline: Deadline,
     spawn_failure: Failure = Failure.MISSING_CLI,
 ) -> CompletedCall:
-    """Run one program to completion inside the deadline, and clean up after it.
+    """Run one bounded program to completion, and clean up after it.
+
+    This is the readiness shape of a call: a cheap question a connector asks,
+    bounded by the deadline it was handed, because a question that will not
+    answer is not work worth waiting on. The work shape is `start_call`,
+    which nothing kills on a clock.
 
     `argv` is a fixed argument vector run without a shell. `stdin_text` is
     written to the program's standard input and the input is then closed, so a
@@ -1040,171 +1320,15 @@ def run_bounded(
     remaining = deadline.remaining()
     if remaining <= 0.0:
         raise BridgeError(Failure.TIMEOUT, detail=" ".join(argv[:2]))
-    payload = stdin_text.encode("utf-8")
-    timed_out = False
-    stdout = b""
-    stderr = b""
-    process = None  # type: Optional[subprocess.Popen]
-    pgid = None  # type: Optional[int]
-    job = None  # type: Optional[int]
-    # The handlers go on before the child does, and a stop is deferred for the
-    # whole life of the child: while it is being started, while its group is
-    # being read, and while that group is being emptied. The one window where a
-    # stop raises where it lands is the wait for the answer, and that window
-    # sits inside the cleanup that catches what it raises. So there is no
-    # instruction anywhere between the child appearing and its group being
-    # empty at which a stop can leave without cleanup having run.
-    with stopped_by_signal() as watch:
-        with watch.deferring():
-            try:
-                spawn = {
-                    "stdin": subprocess.PIPE,
-                    "stdout": subprocess.PIPE,
-                    "stderr": subprocess.PIPE,
-                    "shell": False,
-                    "close_fds": True,
-                }
-                if WINDOWS:
-                    # The Windows twin of the new session - a new process
-                    # group, led by the child and numbered by its own pid -
-                    # combined with the flag that starts the child's primary
-                    # thread suspended, so that none of its code runs until
-                    # this code resumes it below. `start_new_session` has no
-                    # meaning there, and the creation flags have no meaning
-                    # on POSIX, so the branch is the whole difference
-                    # between the two platforms.
-                    spawn["creationflags"] = (
-                        _CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED
-                    )
-                else:
-                    spawn["start_new_session"] = True
-                try:
-                    process = subprocess.Popen(
-                        list(argv),
-                        cwd=cwd,
-                        env=dict(env),
-                        **spawn
-                    )
-                except OSError as exc:
-                    # The one refusal that is about the call rather than the
-                    # program: the kernel would not build an argument block
-                    # this large. It is the transport's failure and is named
-                    # as such, not as a missing program or a failed peer.
-                    if exc.errno == errno.E2BIG:
-                        raise BridgeError(
-                            Failure.USAGE_ERROR,
-                            detail=(
-                                "the operating system refused to start {0} "
-                                "because its argument list and environment "
-                                "together were too long ({1}); send a "
-                                "shorter message, or use a peer that reads "
-                                "standard input".format(argv[0], exc)
-                            ),
-                        )
-                    raise BridgeError(spawn_failure, detail=str(exc))
-                pgid = _own_group(process)
-                if WINDOWS:
-                    # Ownership is established before execution. The child
-                    # was created suspended, the kill-on-close job is
-                    # created and assigned while it has run nothing, and
-                    # only then is its primary thread resumed - so there is
-                    # no moment at which the child can be running, or can
-                    # have started a descendant, outside the job. A platform
-                    # that refuses the job or the resume refuses the turn:
-                    # what was started has never run, so it is terminated
-                    # outright with nothing yet beside it to miss, any job
-                    # already taken is released, and the refusal is the
-                    # answer - because the alternative is a tree nobody
-                    # owns. `pgid` is handed back so the cleanup below knows
-                    # the responsibility has already been taken.
-                    try:
-                        job = _windows_own_tree(process)
-                        _windows_resume_root(process)
-                    except BridgeError:
-                        _windows_end_root(process)
-                        if job is not None:
-                            _windows_release_job(job)
-                        _reap(process, ESCALATION_GRACE_SECONDS)
-                        pgid = None
-                        job = None
-                        raise
-                with watch.allowing():
-                    # The wait is one deadline-watched loop rather than one
-                    # blocking call, for one reason only: so that a caller who
-                    # asked to be checked in with can be, while the child runs,
-                    # without a second thread or a second clock. The deadline
-                    # itself is the only bound; a check-in says nothing about
-                    # progress. Retrying `communicate` after a timeout loses no
-                    # output, and the body is supplied on the first pass only.
-                    remaining = deadline.remaining()
-                    supplied_body = True
-                    while True:
-                        if deadline.heartbeat is None:
-                            wait = remaining
-                        else:
-                            wait = min(remaining, HEARTBEAT_SECONDS)
-                        # An explicitly unbounded run still checks in when
-                        # requested, and still cleans up on caller stop.
-                        call_timeout = None if math.isinf(wait) else wait
-                        try:
-                            if supplied_body:
-                                stdout, stderr = process.communicate(
-                                    input=payload, timeout=call_timeout
-                                )
-                            else:
-                                stdout, stderr = process.communicate(timeout=call_timeout)
-                            break
-                        except subprocess.TimeoutExpired:
-                            supplied_body = False
-                            remaining = deadline.remaining()
-                            if remaining <= 0.0:
-                                timed_out = True
-                                break
-                            if deadline.heartbeat is not None:
-                                deadline.heartbeat(
-                                    deadline.elapsed(),
-                                    process.poll() is None,
-                                )
-            finally:
-                if process is not None:
-                    try:
-                        # Still deferred, so a second stop cannot abandon this
-                        # half done. When the group was never this turn's to
-                        # signal, `_own_group` has already said so - or, on
-                        # Windows, the job- or resume-refusal path has
-                        # already ended what it started - and nothing here
-                        # signals anything.
-                        if pgid is not None:
-                            _cleanup_group(process, pgid, job)
-                    finally:
-                        if timed_out:
-                            # The group is gone, so the pipes are at end-of-file
-                            # and this returns at once with everything the
-                            # program managed to say.
-                            try:
-                                stdout, stderr = process.communicate(
-                                    timeout=ESCALATION_GRACE_SECONDS
-                                )
-                            except (
-                                subprocess.TimeoutExpired,
-                                ValueError,
-                                OSError,
-                            ):
-                                stdout, stderr = b"", b""
-                        _close_streams(process)
-        # Nothing this turn started is left, so a stop that arrived while it was
-        # being deferred can be raised now without leaving anything behind.
-        watch.raise_if_stopped()
-
-    out_text = stdout.decode("utf-8", "replace") if stdout else ""
-    err_text = stderr.decode("utf-8", "replace") if stderr else ""
-    if timed_out:
+    with start_call(argv, cwd, env, stdin_text, spawn_failure) as call:
+        finished = call.wait(remaining, heartbeat=deadline.heartbeat)
+        outcome = call.outcome()
+        pid = call.pid
+    if not finished:
         raise PeerTimeout(
-            pid=process.pid,
-            stdout=out_text,
-            stderr=err_text,
+            pid=pid,
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
             detail="{0} after {1:.0f}s".format(argv[0], deadline.seconds),
         )
-    return CompletedCall(
-        returncode=process.returncode, stdout=out_text, stderr=err_text
-    )
+    return outcome

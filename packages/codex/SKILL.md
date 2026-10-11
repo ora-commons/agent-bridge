@@ -121,8 +121,8 @@ python3 -m bridge run --session <absolute-session-directory> [--timeout <seconds
 
 Before starting, tell the user which target will be called and which session
 folder will receive the record. A real call can take minutes and consume the
-target harness's quota. Keep the command attached and set its wait longer than
-the Bridge timeout. The default Bridge timeout is 900 seconds. Surface each
+target harness's quota. Keep the command attached. Bridge sets no timeout of its own: it
+waits until the target answers or the caller stops the run. Surface each
 `Warning:` line from standard error as it arrives; it does not require an
 acknowledgment and must not be suppressed.
 

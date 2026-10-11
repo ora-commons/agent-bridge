@@ -1061,10 +1061,21 @@ class TurnBehavior(unittest.TestCase):
 
     # -- failures publish no answer ----------------------------------------
 
-    def test_timeout_publishes_no_response(self):
-        self._expect(Failure.TIMEOUT, "hang", timeout=1.0)
+    def test_a_bounded_wait_publishes_no_response_and_kills_nothing(self):
+        """The wait returns control; the request stays and no answer exists.
+
+        A bounded wait is not a deadline: it leaves the peer running, so the
+        turn comes back as something the caller still holds, and cancelling
+        it cleans up the peer it owns.
+        """
+        result = self._turn("hang", timeout=1.0)
+        self.assertIsInstance(result, runner.PendingTurn)
         self.assertEqual(self._messages(), ["0001-initiator-to-peer.md"])
         self.assertEqual(self._leftover_temporaries(), [])
+        self.assertTrue(_wait_for(lambda: not _process_gone(result.peer_pid)))
+        result.cancel()
+        self.assertTrue(_wait_for(lambda: _process_gone(result.peer_pid)))
+        self.assertEqual(self._messages(), ["0001-initiator-to-peer.md"])
 
     def test_nonzero_exit_publishes_no_response(self):
         body = (
@@ -1378,6 +1389,202 @@ class TurnBehavior(unittest.TestCase):
             _wait_for(lambda: _process_gone(child_pid)),
             "the detached child could not be ended by this check either",
         )
+
+
+class NoDeadlineWaitAndRetainedEvidence(unittest.TestCase):
+    """The no-deadline route, and what a bounded wait or a stop leaves behind.
+
+    A bounded wait returns control without stopping the peer, so the turn
+    comes back as something the caller still holds and can collect. The
+    evidence it carries names the session and its published request, the
+    peer's own session identity when its output revealed one, and sanitized
+    partial output - partial work, never a final answer.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.mkdtemp(prefix="agent-bridge-wait-")
+        self.session_dir = os.path.join(self.temp, "session")
+        record.record(
+            self.session_dir,
+            "session-create",
+            "Prove the wait and evidence contract without a real harness.\n",
+            initiator="sample-app",
+            peer="claude",
+        )
+        self.strays = []
+
+    def tearDown(self):
+        for pid in self.strays:
+            if not _process_gone(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    def _builder(self, mode, *extra):
+        argv = (sys.executable, FAKE_PEER, mode) + tuple(extra)
+
+        def build(deadline, cwd):
+            return PeerCommand(
+                argv=argv, cwd=cwd, env=tuple(os.environ.items())
+            )
+
+        return build
+
+    def _messages(self):
+        return sorted(os.listdir(session.messages_dir(self.session_dir)))
+
+    def _await_pids(self, pid_path, names):
+        reported = {}
+
+        def read():
+            try:
+                with open(pid_path, encoding="utf-8") as stream:
+                    found = dict(
+                        (kind, int(number))
+                        for kind, number in PID_LINE.findall(stream.read())
+                    )
+            except OSError:
+                return False
+            if set(names) <= set(found):
+                reported.update(found)
+                return True
+            return False
+
+        self.assertTrue(_wait_for(read), "the processes were never reported")
+        pids = []
+        for name in names:
+            pid = reported[name]
+            self.strays.append(pid)
+            pids.append(pid)
+        return tuple(pids)
+
+    def test_a_bounded_wait_returns_control_and_the_result_is_collectable(self):
+        result = runner.run_turn(
+            self.session_dir, "Wait past the bound.\n", 0.3,
+            self._builder("delay-echo", "0.9"),
+        )
+        self.assertIsInstance(result, runner.PendingTurn)
+        self.assertFalse(_process_gone(result.peer_pid))
+        self.assertEqual(self._messages(), ["0001-initiator-to-peer.md"])
+        evidence = result.evidence()
+        self.assertEqual(evidence.session_dir, self.session_dir)
+        self.assertTrue(evidence.request_on_disk)
+        self.assertIsNone(evidence.peer_session)
+
+        collected = result.collect()
+        self.assertIsInstance(collected, runner.TurnResult)
+        with open(collected.response_path, encoding="utf-8") as stream:
+            self.assertIn("Wait past the bound.\n", stream.read())
+        self.assertEqual(
+            self._messages(),
+            ["0001-initiator-to-peer.md", "0002-peer-to-initiator.md"],
+        )
+        self.assertTrue(_wait_for(lambda: _process_gone(result.peer_pid)))
+        for path in evidence.capture_paths:
+            self.assertFalse(os.path.exists(path))
+
+    def test_the_ordinary_route_runs_to_completion_with_no_deadline(self):
+        result = runner.run_turn(
+            self.session_dir, "Take your time.\n", None,
+            self._builder("delay-echo", "1.2"),
+        )
+        self.assertIsInstance(result, runner.TurnResult)
+        self.assertEqual(result.response_sequence, 2)
+        self.assertEqual(
+            self._messages(),
+            ["0001-initiator-to-peer.md", "0002-peer-to-initiator.md"],
+        )
+
+    def test_cancelling_a_pending_turn_cleans_up_the_processes_it_owns(self):
+        pid_path = os.path.join(self.temp, "cancel-pids.txt")
+        result = runner.run_turn(
+            self.session_dir, "Cancel me.\n", 0.4,
+            self._builder("write-pids-then-hang", pid_path),
+        )
+        self.assertIsInstance(result, runner.PendingTurn)
+        peer_pid, child_pid = self._await_pids(pid_path, ("PEER", "CHILD"))
+        result.cancel()
+        self.assertTrue(_wait_for(lambda: _process_gone(peer_pid)))
+        self.assertTrue(_wait_for(lambda: _process_gone(child_pid)))
+        self.assertEqual(self._messages(), ["0001-initiator-to-peer.md"])
+
+    def test_pending_evidence_retains_sanitizes_and_never_publishes_partial(self):
+        body = 'PRIVATE REQUEST "confidential" request-content PRIVATE END\n'
+        events = []
+        result = runner.run_turn(
+            self.session_dir, body, 0.4,
+            self._builder("noisy-echo", "1.0"),
+            event_writer=events.append,
+        )
+        self.assertIsInstance(result, runner.PendingTurn)
+        evidence = result.evidence()
+        self.assertEqual(evidence.peer_session, "fake-peer-session-0001")
+        self.assertTrue(evidence.request_on_disk)
+        self.assertIn("PROGRESS still working", evidence.stdout_progress)
+        self.assertIn("credential line redacted", evidence.stderr_progress)
+        rendered = json.dumps(evidence._asdict())
+        self.assertNotIn("opaque-value", rendered)
+        self.assertNotIn("confidential", rendered)
+        expiry = [
+            json.loads(line)
+            for line in events
+            if json.loads(line)["event"] == "wait_expired"
+        ]
+        self.assertEqual(len(expiry), 1)
+        self.assertEqual(expiry[0]["peer_session"], "fake-peer-session-0001")
+        # Partial progress never becomes a final answer.
+        self.assertEqual(self._messages(), ["0001-initiator-to-peer.md"])
+        result.cancel()
+
+    def test_an_interrupted_turn_keeps_its_request_and_evidence(self):
+        pid_path = os.path.join(self.temp, "stopped-pids.txt")
+        events = []
+        with self.assertRaises(peer.SignalStop):
+            runner.run_turn(
+                self.session_dir, "Stop me mid-wait.\n", 30.0,
+                self._builder("stop-parent-then-hang", "60", pid_path),
+                event_writer=events.append,
+            )
+        (peer_pid,) = self._await_pids(pid_path, ("PEER",))
+        self.assertTrue(_wait_for(lambda: _process_gone(peer_pid)))
+        self.assertEqual(self._messages(), ["0001-initiator-to-peer.md"])
+        finished = json.loads(events[-1])
+        self.assertEqual(finished["event"], "finished")
+        self.assertEqual(finished["outcome"], "stopped")
+        self.assertTrue(
+            finished["request_path"].endswith("0001-initiator-to-peer.md")
+        )
+        self.assertEqual(finished["peer_session"], "fake-peer-session-0001")
+        self.assertIn("PROGRESS still working", finished["stdout_progress"])
+        self.assertIn("credential line redacted", finished["stderr_progress"])
+        self.assertNotIn("opaque-value", json.dumps(finished))
+        self.assertNotIn("response_path", finished)
+
+    def test_unavailable_evidence_is_stated_rather_than_invented(self):
+        events = []
+        result = runner.run_turn(
+            self.session_dir, "Say nothing at all.\n", 0.4,
+            self._builder("hang"),
+            event_writer=events.append,
+        )
+        self.assertIsInstance(result, runner.PendingTurn)
+        evidence = result.evidence()
+        self.assertIsNone(evidence.peer_session)
+        self.assertIsNone(evidence.stdout_progress)
+        self.assertIsNone(evidence.stderr_progress)
+        expiry = [
+            json.loads(line)
+            for line in events
+            if json.loads(line)["event"] == "wait_expired"
+        ]
+        self.assertEqual(len(expiry), 1)
+        self.assertTrue(expiry[0]["peer_running"])
+        self.assertNotIn("peer_session", expiry[0])
+        self.assertNotIn("stdout_progress", expiry[0])
+        self.assertNotIn("stderr_progress", expiry[0])
+        result.cancel()
 
 
 class ClaudeManagedSettingsReadiness(unittest.TestCase):
@@ -2103,7 +2310,7 @@ class SixTargetConnectorBehavior(unittest.TestCase):
         called.assert_called_once_with(
             session_dir="/session",
             body="Please answer.\n",
-            timeout_seconds=900.0,
+            wait_seconds=None,
             no_timeout=False,
             warning_writer=mock.ANY,
             max_steps=2,

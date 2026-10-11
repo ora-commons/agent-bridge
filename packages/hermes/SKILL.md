@@ -24,10 +24,11 @@ another adapter.
 Run every command with Hermes's terminal tool and wait for it in the foreground.
 Do not hand a Bridge command to a subagent, detach it, or start a poller.
 
-Hermes's terminal tool waits for at most 600 seconds. For a real `run`, pass
-Bridge `--timeout 540` and give the terminal its 600-second wait. That leaves
-Bridge time to end and reap the target process before the terminal itself stops
-waiting.
+Hermes's terminal tool caps a foreground wait at 600 seconds. For a real `run`,
+pass Bridge `--timeout 540` so the command returns just before that cap; Bridge
+sets no timeout of its own and never kills the target - at 540 seconds it
+returns control, leaves the target running, and reports where its retained
+work and session record can be inspected.
 
 ## Boundary
 

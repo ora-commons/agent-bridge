@@ -520,7 +520,6 @@ class WorkTurnBehavior(unittest.TestCase):
 
         output, errors = io.StringIO(), io.StringIO()
         with mock.patch.object(runner.connectors, "resolve", return_value=SlowWorkConnector), \
-                mock.patch.object(cli, "DEFAULT_TIMEOUT_SECONDS", 0.05), \
                 mock.patch.object(peer, "HEARTBEAT_SECONDS", 0.05), \
                 mock.patch("sys.stdin", io.StringIO("Wait for the answer.\n")), \
                 mock.patch("sys.stdout", output), mock.patch("sys.stderr", errors):
@@ -552,23 +551,66 @@ class WorkTurnBehavior(unittest.TestCase):
                     cwd=cwd, env=tuple(os.environ.items()),
                 )
 
-        for options in ([], ["--timeout", "0.15"]):
-            with self.subTest(options=options):
-                output, errors = io.StringIO(), io.StringIO()
-                with mock.patch.object(runner.connectors, "resolve", return_value=HangingWorkConnector), \
-                        mock.patch.object(cli, "DEFAULT_TIMEOUT_SECONDS", 0.15), \
-                        mock.patch("sys.stdin", io.StringIO("Do not wait forever.\n")), \
-                        mock.patch("sys.stdout", output), mock.patch("sys.stderr", errors):
-                    status = cli.main([
-                        "run", "--session", self.session_dir, "--events-jsonl", *options,
-                    ])
-                self.assertEqual(status, 1)
-                events = [json.loads(line) for line in output.getvalue().splitlines()]
-                self.assertEqual(events[-1]["outcome"], "failure")
-                self.assertIn("reached its deadline", events[-1]["reason"])
-                self.assertNotIn("response_path", events[-1])
+        # A named bounded wait returns control without stopping the peer:
+        # nonzero exit, a pending finished event carrying the retained
+        # evidence, and no response - then this check kills the peer itself.
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch.object(runner.connectors, "resolve", return_value=HangingWorkConnector), \
+                mock.patch("sys.stdin", io.StringIO("Do not wait forever.\n")), \
+                mock.patch("sys.stdout", output), mock.patch("sys.stderr", errors):
+            status = cli.main([
+                "run", "--session", self.session_dir, "--events-jsonl",
+                "--timeout", "0.15",
+            ])
+        self.assertEqual(status, 1)
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(events[-1]["outcome"], "pending")
+        self.assertTrue(events[-1]["request_path"].endswith(
+            "0001-initiator-to-peer.md"
+        ))
+        self.assertEqual(events[-1]["peer_running"], True)
+        self.assertNotIn("response_path", events[-1])
+        self.assertEqual(events[-1]["session_dir"], self.session_dir)
+        self.assertTrue(events[-1]["request_on_disk"])
+        pid = events[-1]["peer_pid"]
+        try:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+        # Detach retained the capture files; this check now removes them.
+        retained = events[-1].get("capture_paths", [])
+        self.assertTrue(retained)
+        for path in retained:
+            self.assertTrue(os.path.exists(path))
+            os.unlink(path)
+
+        # The default is deadline-free: a peer that answers slowly is waited
+        # for and its response published.
+        class SlowWorkConnector:
+            CAPABILITIES = connectors.Capabilities("supported", "fake", "unsupported", "no images")
+
+            @staticmethod
+            def build_work_command(deadline, cwd, **kwargs):
+                return PeerCommand(
+                    argv=(sys.executable, FAKE_PEER, "delay-echo", "0.5"),
+                    cwd=cwd, env=tuple(os.environ.items()),
+                )
+
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch.object(runner.connectors, "resolve", return_value=SlowWorkConnector), \
+                mock.patch("sys.stdin", io.StringIO("Wait as long as it takes.\n")), \
+                mock.patch("sys.stdout", output), mock.patch("sys.stderr", errors):
+            status = cli.main(["run", "--session", self.session_dir, "--events-jsonl"])
+        self.assertEqual(status, 0, errors.getvalue())
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(events[-1]["outcome"], "success")
+
         before = sorted(os.listdir(session.messages_dir(self.session_dir)))
-        self.assertEqual(before, ["0001-initiator-to-peer.md", "0002-initiator-to-peer.md"])
+        self.assertEqual(before, [
+            "0001-initiator-to-peer.md", "0002-initiator-to-peer.md",
+            "0003-peer-to-initiator.md",
+        ])
         with mock.patch("sys.stderr", io.StringIO()) as errors:
             status = cli.main([
                 "run", "--session", self.session_dir,
@@ -676,21 +718,28 @@ sys.exit(cli.main(['run', '--session', sys.argv[3], '--no-timeout', '--events-js
         self.assertEqual(finished["response_path"], result.response_path)
         self.assertTrue(finished["request_path"].endswith("0001-initiator-to-peer.md"))
 
-        # A timed-out work call reports failure, keeps its request, and never
-        # reports success.
+        # A bounded work wait returns control without stopping the peer: the
+        # request is retained, no response exists, and cancelling cleans up.
         events = []
-        with self.assertRaises(BridgeError) as caught:
-            runner.run_turn(
-                self.session_dir,
-                "Never answer in time.\n",
-                0.6,
-                build_work_command=self._builder("hang"),
-                event_writer=events.append,
-            )
-        self.assertEqual(caught.exception.failure, Failure.TIMEOUT)
+        pending = runner.run_turn(
+            self.session_dir,
+            "Never answer in time.\n",
+            0.6,
+            build_work_command=self._builder("hang"),
+            event_writer=events.append,
+        )
+        self.assertIsInstance(pending, runner.PendingTurn)
+        parsed = [json.loads(line) for line in events]
+        self.assertEqual(
+            [event["event"] for event in parsed][-1], "wait_expired"
+        )
+        self.assertNotIn(
+            "finished", [event["event"] for event in parsed]
+        )
+        pending.cancel()
         parsed = [json.loads(line) for line in events]
         finished = parsed[-1]
-        self.assertEqual(finished["outcome"], "failure")
+        self.assertEqual(finished["outcome"], "stopped")
         self.assertNotIn("response_path", finished)
         self.assertTrue(finished["request_path"].endswith("0003-initiator-to-peer.md"))
         self.assertEqual(
@@ -1098,13 +1147,17 @@ class ReadinessAndSupport(unittest.TestCase):
             {
                 "peer": "codex",
                 "mode": "work",
+                "bridge_version": cli.VERSION,
                 "ready": True,
+                "command_present": True,
                 "executable": "/fake/peer",
                 "version": "9.9.9",
                 "platform": "Darwin 26 arm64",
                 "authentication": "unknown",
+                "review": "supported",
                 "work": "supported",
                 "image": "unknown",
+                "compatibility": "unknown",
                 "warnings": ["one warning"],
             },
         )
@@ -1125,6 +1178,22 @@ class ReadinessAndSupport(unittest.TestCase):
         self.assertEqual(result["authentication"], "confirmed")
         self.assertEqual(result["mode"], "review")
 
+        class QualifiedConnector(ConfirmedConnector):
+            @staticmethod
+            def check(deadline, cwd, mode="review"):
+                return connectors.CheckResult(
+                    "confirmed",
+                    (),
+                    executable="/fake/peer",
+                    version="9.9.9",
+                    platform="Darwin 26 arm64",
+                    authentication_confirmed=True,
+                    qualified=True,
+                )
+
+        _status, result = self._check_json("codex", "review", QualifiedConnector)
+        self.assertEqual(result["compatibility"], "supported")
+
         class UnauthenticatedConnector:
             CAPABILITIES = UnknownAuthConnector.CAPABILITIES
 
@@ -1140,6 +1209,55 @@ class ReadinessAndSupport(unittest.TestCase):
         self.assertEqual(result["authentication"], "required")
         self.assertIn("login status exited 1", result["reason"])
         self.assertTrue(result["next_action"])
+        # A failed login erases neither the command nor the implemented
+        # capabilities; only the compatibility of this combination, which the
+        # failed check never established, stays unset (null).
+        self.assertEqual(result["command_present"], True)
+        self.assertEqual(result["review"], "supported")
+        self.assertEqual(result["work"], "supported")
+        self.assertEqual(result["image"], "unknown")
+        self.assertIsNone(result["compatibility"])
+
+        class MissingConnector:
+            CAPABILITIES = UnknownAuthConnector.CAPABILITIES
+
+            @staticmethod
+            def check(deadline, cwd, mode="review"):
+                raise BridgeError(Failure.MISSING_CLI, detail="codex")
+
+        status, result = self._check_json("codex", "review", MissingConnector)
+        self.assertEqual(status, 1)
+        self.assertEqual(result["ready"], False)
+        self.assertEqual(result["command_present"], False)
+        self.assertEqual(result["review"], "supported")
+        self.assertEqual(result["work"], "supported")
+
+        class UnsupportedWorkConnector:
+            CAPABILITIES = connectors.Capabilities(
+                work="unsupported",
+                work_detail="terminal route: run it yourself",
+                image="unknown",
+                image_detail="no evidence either way",
+            )
+
+            @staticmethod
+            def check(deadline, cwd, mode="review"):
+                return connectors.CheckResult(
+                    "unconfirmed",
+                    (),
+                    executable="/fake/peer",
+                    version="9.9.9",
+                    platform="Darwin 26 arm64",
+                    authentication_confirmed=False,
+                    qualified=True,
+                )
+
+        status, result = self._check_json(
+            "hermes", "work", UnsupportedWorkConnector
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(result["compatibility"], "unsupported")
+        self.assertIn("terminal route", result["warnings"][-1])
 
     def test_unsupported_work_routes_are_refused_with_the_real_reason(self):
         for connector, peer_id in ((hermes, "hermes"), (qwen, "qwen")):
@@ -1411,7 +1529,9 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
         )
         with mock.patch.object(minimax, "_prerequisites", return_value=prerequisite):
             command = minimax.build_work_command(
-                peer.Deadline(60.0), self.temp, attachments=("/img/a.png",)
+                peer.Deadline(60.0, work_seconds=float("inf")),
+                self.temp,
+                attachments=("/img/a.png",),
             )
             bounded = minimax.build_work_command(
                 peer.Deadline(60.0), self.temp, max_steps=4
@@ -1427,8 +1547,6 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
                 "text",
                 "--cwd",
                 self.temp,
-                "--timeout",
-                "60000ms",
                 "--file",
                 "/img/a.png",
                 "--output-format",

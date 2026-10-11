@@ -135,27 +135,33 @@ It runs in a task-owned neutral directory and never touches a real project, inst
 `--json` replaces the prose with exactly one JSON object on standard output, one line, no schema version. Success and failure alike produce one object; a failure still exits nonzero.
 
 ```json
-{"peer": "codex", "mode": "work", "ready": true,
+{"peer": "codex", "mode": "work", "bridge_version": "1.3.0", "ready": true,
+ "command_present": true,
  "executable": "/usr/local/bin/codex", "version": "0.155.1",
  "platform": "Darwin 26 arm64",
  "authentication": "confirmed",
- "work": "supported", "image": "supported",
+ "review": "supported", "work": "supported", "image": "supported",
+ "compatibility": "supported",
  "warnings": ["...one concrete warning per line..."]}
 ```
 
 | Field | Values and meaning |
 |---|---|
 | `peer`, `mode` | The selected target and the posture checked (`review` or `work`). |
+| `bridge_version` | Version of the Bridge copy that produced this object. |
+| `command_present` | Whether the target's local command was found. `false` only when the CLI is absent; any other failure implies the program was found. |
 | `ready` | Whether the selected mode's call mechanics are usable now. A successful local check does not prove the selected model will answer or that every future permission is available. |
 | `executable`, `version`, `platform` | Observed facts about the installed program, or `null` when a failure happened before they could be read. |
 | `authentication` | `confirmed` (the CLI reported a sign-in), `required` (the CLI reported none; the object carries the reason), or `unknown` (this CLI offers no safe no-turn check; unknown is not failure when the route is usable). |
+| `review` | The implemented analytical action, `supported` for every connector. Present on failure paths too, so a failed sign-in does not erase implemented capabilities. |
 | `work`, `image` | `supported` (a route is implemented and its switches verified present), `unsupported` (a genuine vendor limitation, named in `warnings` with the terminal route), or `unknown`. Supported means transport support; whether the model accepted a live work call or image is stated in `warnings`, which distinguish verified evidence from unverified acceptance. |
+| `compatibility` | `supported` (observed executable version and platform are inside the connector's exercised release evidence), `unknown` (outside that evidence, or nothing established it — a newer or legacy version is never auto-unsupported), `unsupported` (a work-mode check of a target whose work route is unsupported), or `null` when a failure prevented establishing it. |
 | `warnings` | The same concrete non-blocking warnings the prose interface prints, plus the capability-detail sentence for any `unsupported` value. |
 | `reason`, `next_action` | Present when `ready` is false: what happened and the one useful next action. |
 
 ### `run`
 
-`run` reads the session's initiator, target, and optional project, then reads one nonempty Markdown body from standard input. It resolves only that target, repeats cheap prerequisites, validates transport, and determines current warnings. It writes any `Warning:` lines to standard error immediately before publishing the request, then starts exactly one bounded target CLI invocation, captures its final text, and atomically publishes the response.
+`run` reads the session's initiator, target, and optional project, then reads one nonempty Markdown body from standard input. It resolves only that target, repeats cheap prerequisites, validates transport, and determines current warnings. It writes any `Warning:` lines to standard error immediately before publishing the request, then starts exactly one target CLI invocation, captures its final text, and atomically publishes the response.
 
 Warnings never prompt, wait for acknowledgment, read an approval flag, or persist consent. A readable version outside exercised evidence may proceed with a warning when every required switch and the fixed one-shot transport remain usable.
 
@@ -178,7 +184,7 @@ plain-text call, which reports no identity.
 In a work session, `--max-steps` is forwarded when given and omitted otherwise,
 so the review-only one-step assumption does not apply to work.
 
-`--timeout` is one deadline for prerequisites, target execution, and response capture, defaulting to 900 seconds. `--no-timeout` explicitly waits until the target answers or the caller stops the run, and cannot be combined with `--timeout`. Cleanup has a separate bounded grace period. There is no retry.
+`run` has no deadline for ordinary work: it waits until the target answers, the target fails, or the caller stops the run, and readiness checks keep a bounded deadline of their own. `--timeout <seconds>` is a bounded wait, not a kill: when it ends, the command returns control with the target still running and reports the retained evidence (the session and published request, the peer's process and any session reference it printed, and sanitized partial output), exiting nonzero. In ordinary mode that report goes to standard error; with `--events-jsonl` the same evidence arrives as fields of the final `finished` event on standard output (section 4b). `--no-timeout` names the default behavior explicitly and cannot be combined with `--timeout`. Cleanup has a separate bounded grace period. On Windows a retained or detached target ends when the owning Bridge process exits; macOS and Linux are unaffected. There is no retry.
 
 A courier-only project session cannot run in review mode: Bridge refuses before connector import or request publication and tells the application to include evidence in the body or choose a project-capable target. A work session runs against the connector's work vector (section 4a); a work session whose target declares work unsupported is refused the same way, with the real limitation and the terminal route in the message.
 
@@ -212,7 +218,7 @@ Each call still starts a fresh native context. A successful work call returns th
 
 ### `run --events-jsonl`
 
-With `--events-jsonl`, standard output carries one JSON object per line — lifecycle events, periodic check-ins, and exactly one final result — and nothing else; the response path arrives inside the final event. Every event line, like the response-path line a flag-free run prints, is flushed to standard output the moment it is written, so a consumer reading a pipe sees it during the turn rather than at exit. Standard error remains diagnostics, warnings included. Every event object has an `event` field (`started`, `heartbeat`, or `finished`) and a `phase` field.
+With `--events-jsonl`, standard output carries one JSON object per line — lifecycle events, periodic check-ins, and exactly one final result — and nothing else; the response path arrives inside the final event. Every event line, like the response-path line a flag-free run prints, is flushed to standard output the moment it is written, so a consumer reading a pipe sees it during the turn rather than at exit. Standard error remains diagnostics, warnings included. Every event object has an `event` field (`started`, `heartbeat`, `wait_expired`, or `finished`) and a `phase` field.
 
 ```json
 {"event": "started", "phase": "run", "peer": "codex", "mode": "work"}
@@ -224,7 +230,7 @@ With `--events-jsonl`, standard output carries one JSON object per line — life
  "warnings": ["...the same warnings standard error carried..."]}
 ```
 
-A heartbeat means Bridge is alive and can report whether its child process is still running; it is not progress and carries no percentages. Heartbeats arrive while prerequisite probes or the peer call are waiting (`phase` says which), about every 30 seconds. Both waits share the turn's one deadline, or its explicit `--no-timeout` choice. The final `finished` event carries `outcome` (`success`, `failure`, or `stopped`), `request_path` and `response_path` when published, the warnings, and — for `failure` — a plain `reason` and `next_action`; internal exception names stay internal. A `success` event may additionally carry `model` and `provider` when the target's own structured output reported the identity that answered — MiniMax's `--require-model` JSON mode is the one such route today — and both fields are absent when it did not, never empty strings; they state what the tool reported, never a Bridge selection. A `success` event follows durable response publication. A failed call still exits nonzero. If the event pipe breaks, the turn runs on and its records decide the truth: a broken pipe can never turn an unfinished call into a reported success.
+A heartbeat means Bridge is alive and can report whether its child process is still running; it is not progress and carries no percentages. Heartbeats arrive while prerequisite probes or the peer call are waiting (`phase` says which), about every 30 seconds; ordinary waiting has no deadline. The final `finished` event carries `outcome` (`success`, `failure`, `stopped`, or `pending` — the last when a bounded wait returned control with the target still running), `request_path` and `response_path` when published, the warnings, and — for `failure` — a plain `reason` and `next_action`; internal exception names stay internal. Each time a bounded wait ends with the target still running, a `wait_expired` event (`phase` `peer-call`) is emitted, and the `pending` `finished` event carries the same retained evidence fields: `session_dir`, `request_on_disk`, `peer_pid`, and `peer_running`, with `peer_session`, `stdout_progress`, `stderr_progress`, `elapsed_seconds` (measured from the peer call's start), and `capture_paths` (the retained capture files) present when there is something to report. A `success` event may additionally carry `model` and `provider` when the target's own structured output reported the identity that answered — MiniMax's `--require-model` JSON mode is the one such route today — and both fields are absent when it did not, never empty strings; they state what the tool reported, never a Bridge selection. A `success` event follows durable response publication. A failed call still exits nonzero. If the event pipe breaks, the turn runs on and its records decide the truth: a broken pipe can never turn an unfinished call into a reported success.
 
 Stop signals, `--timeout` or `--no-timeout`, interruption, and cleanup behave exactly as for any other run; there is no separate cancellation daemon or command service.
 
@@ -430,8 +436,8 @@ A connector may remove tools, use an enforced sandbox, withhold the project, or 
 | Claude Code | Project-capable | Restricted mode, empty strict MCP set, Read/Glob/Grep, planning mode | Administrator-managed or remote policy can survive and add effects |
 | ZCode | Project-capable | Planning mode, explicit directory, known dangerous tools removed | Plugin/direct-MCP limits, indirect OAuth evidence, visible body argument |
 | Hermes Agent | Courier-only | Neutral directory, safe mode, smallest harmless toolset | Read cannot be separated from write, memory remains, visible body argument |
-| MiniMax Code | Courier-only | Neutral directory, `exec` with standard input, `--permission smart`, one assistant step by default or an explicit positive bound, native timeout within its supported range; optional exact returned-model validation | Smart is discretionary, not a sandbox; a step bound does not disable tools; no state-free authentication check |
-| Qwen Code | Courier-only | Neutral directory, safe and plan modes, pinned native macOS sandbox selection/profile, zero model tool calls, one input frame and turn, compatible time and pre-model command limits | Input preprocessing below; settings/.env may bypass sandbox or launch a detached proxy; profile permits same-user reads, some writes, process launches, and network; no safe no-turn authentication confirmation |
+| MiniMax Code | Courier-only | Neutral directory, `exec` with standard input, `--permission smart`, one assistant step by default or an explicit positive bound; optional exact returned-model validation | Smart is discretionary, not a sandbox; a step bound does not disable tools; no state-free authentication check |
+| Qwen Code | Courier-only | Neutral directory, safe and plan modes, pinned native macOS sandbox selection/profile, zero model tool calls, one input frame and turn, pre-model command limits | Input preprocessing below; settings/.env may bypass sandbox or launch a detached proxy; profile permits same-user reads, some writes, process launches, and network; no safe no-turn authentication confirmation |
 
 For Codex, `--ignore-user-config` does only what its name understates: it skips `$CODEX_HOME/config.toml`. It does not suppress trusted-project `.codex/config.toml` files and project hooks or rules, system configuration, `managed_config.toml`, `requirements.toml`, cloud-delivered requirements, macOS MDM preferences, or separately sourced user/global hooks and rules. Those surviving layers can add settings the fixed vector does not override, and managed defaults or MDM can override CLI options. Hooks, MCP servers, plugins, network or telemetry settings, and other integrations from surviving configuration may therefore retain routes to external effects outside the read-only shell sandbox. Bridge names that limit in its non-blocking warning. The skipped file's model and effort defaults are also lost, and Bridge does not replace them.
 
@@ -462,7 +468,7 @@ Qualification is source evidence, not mutable runtime state. There is no last-pa
 
 ### 8a. Work vectors and image routes
 
-Each connector's work vector is a separate builder beside its review vector, reusing the same fixed-vector transport, output parsing, bounded execution, deadline, and cleanup. Work vectors preserve ordinary user model/configuration choices and the tool's normal permission policy; Bridge passes no approval bypass of any kind. Access directories are recorded in the session and reach the vector where the tool has a matching switch; otherwise they remain ordinary same-user paths, which is a declaration of need, not an isolation boundary.
+Each connector's work vector is a separate builder beside its review vector, reusing the same fixed-vector transport, output parsing, execution, cancellation, and cleanup. Work vectors preserve ordinary user model/configuration choices and the tool's normal permission policy; Bridge passes no approval bypass of any kind. Access directories are recorded in the session and reach the vector where the tool has a matching switch; otherwise they remain ordinary same-user paths, which is a declaration of need, not an isolation boundary.
 
 | Target | Work | Image route | Basis |
 |---|---|---|---|

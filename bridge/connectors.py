@@ -182,8 +182,10 @@ class CheckResult(NamedTuple):
     The remaining fields are the same readiness facts that sentence was built
     from, so a caller that asked for one JSON result reads structured truth
     rather than a sentence parsed back: where the program is, which version
-    answered, how this computer describes itself, and whether live
-    authentication was actually established.
+    answered, how this computer describes itself, whether live authentication
+    was actually established, and whether that version and platform fall
+    inside the connector's exercised release evidence. `qualified` is `None`
+    when nothing established it either way.
     """
 
     message: str
@@ -192,6 +194,7 @@ class CheckResult(NamedTuple):
     version: Optional[str] = None
     platform: Optional[str] = None
     authentication_confirmed: bool = True
+    qualified: Optional[bool] = None
 
 
 class Capabilities(NamedTuple):
@@ -262,6 +265,12 @@ def argument_space_used(
 #: Any dotted release number. Target CLIs surround theirs with wording of their
 #: own, so only the number is read out of it.
 _VERSION = re.compile(r"\d+\.\d+\.\d+")
+
+#: The phrase every exercised-evidence warning carries, whatever else it says.
+#: A readiness result states mechanically whether the installed combination is
+#: inside the connector's release evidence by looking for this marker, so the
+#: sentence and the machine-readable fact cannot drift apart.
+EVIDENCE_MARKER = "outside the release evidence"
 
 
 def environment() -> Tuple[Tuple[str, str], ...]:
@@ -336,10 +345,11 @@ def qualified_version(
         warnings.append(
             "{0} reported version {1}; this connector was exercised against "
             "{2}. The required one-shot and restriction mechanics are present, "
-            "but this version is outside the release evidence.".format(
+            "but this version is {3}.".format(
                 qualification.cli_identity,
                 version,
                 ", ".join(qualification.versions),
+                EVIDENCE_MARKER,
             )
         )
     return version
@@ -382,8 +392,11 @@ def qualified_platform(
         warnings.append(
             "{0} is running on {1}; this connector was exercised on {2}. "
             "The required one-shot and restriction mechanics are present, but "
-            "this platform is outside the release evidence.".format(
-                qualification.cli_identity, described, qualified_platforms
+            "this platform is {3}.".format(
+                qualification.cli_identity,
+                described,
+                qualified_platforms,
+                EVIDENCE_MARKER,
             )
         )
     return described
@@ -476,6 +489,7 @@ def readiness(
         version=version,
         platform=described_platform,
         authentication_confirmed=authentication_confirmed,
+        qualified=not any(EVIDENCE_MARKER in warning for warning in warnings),
     )
 
 

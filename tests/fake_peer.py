@@ -42,6 +42,7 @@ SPDX-License-Identifier: CC0-1.0
 """
 
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -50,7 +51,12 @@ import time
 #: `delay-echo` exists for the lifecycle check-ins: it sleeps for a named
 #: number of seconds and then answers like `plain`, so a caller watching a
 #: bounded wait can observe heartbeats arriving while the child runs and one
-#: final result after it.
+#: final result after it. `noisy-echo` sleeps the same way but first prints
+#: a vendor-style session identity, a credential line, and a progress line,
+#: so a check can prove what a returned-control or stopped turn retained and
+#: what was sanitized out of it. `stop-parent-then-hang` does the same and
+#: then terminates the process that started it, so a check can be interrupted
+#: mid-wait without a driver of its own.
 MODES = (
     "plain",
     "last-argument",
@@ -59,10 +65,12 @@ MODES = (
     "fail",
     "hang",
     "delay-echo",
+    "noisy-echo",
     "spawn-child-then-hang",
     "write-pids-then-hang",
     "write-pids-then-exit",
     "detach-child-then-hang",
+    "stop-parent-then-hang",
 )
 
 #: Long enough to outlast any real deadline, short enough that a stray copy
@@ -209,6 +217,36 @@ def _run(mode: str, extra: list) -> int:
                 return 2
         _sleep_bounded(seconds)
         _emit(echoed)
+        return 0
+
+    if mode in ("noisy-echo", "stop-parent-then-hang"):
+        seconds = 0.0
+        if mode == "noisy-echo" and extra:
+            try:
+                seconds = float(extra[0])
+            except ValueError:
+                sys.stderr.write("fake peer: seconds must be a number\n")
+                return 2
+        if mode == "stop-parent-then-hang":
+            if len(extra) != 2:
+                sys.stderr.write(
+                    "fake peer: {0} needs seconds and a pid path\n".format(mode)
+                )
+                return 2
+            seconds = float(extra[0])
+        sys.stderr.write("session id: fake-peer-session-0001\n")
+        sys.stderr.write("OPENAI_API_KEY=opaque-value\n")
+        sys.stderr.flush()
+        _emit("PROGRESS still working\n")
+        if mode == "stop-parent-then-hang":
+            with open(extra[1], "w", encoding="utf-8") as stream:
+                stream.write("PEER {0}\n".format(os.getpid()))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.kill(os.getppid(), signal.SIGTERM)
+        _sleep_bounded(seconds)
+        if mode == "noisy-echo":
+            _emit(echoed)
         return 0
 
     if mode == "spawn-child-then-hang":

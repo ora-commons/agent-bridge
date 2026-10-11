@@ -18,11 +18,11 @@ import json
 import shutil
 import sys
 import tempfile
-from typing import Iterator, Optional, Sequence
+from typing import Iterator, Optional, Sequence, Tuple
 
-from . import connectors, record as record_module, runner
+from . import VERSION, connectors, record as record_module, runner
 from .errors import BridgeError, Failure, guidance
-from .peer import DEFAULT_TIMEOUT_SECONDS, Deadline, SignalStop
+from .peer import READINESS_TIMEOUT_SECONDS, Deadline, SignalStop
 
 PROGRAM = "agent-bridge"
 NEUTRAL_PREFIX = "agent-bridge-neutral-"
@@ -56,9 +56,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--session", required=True)
     timing = run.add_mutually_exclusive_group()
-    timing.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    timing.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="return control after this many seconds of waiting, without "
+             "stopping the peer; the run reports where the work continues",
+    )
     timing.add_argument("--no-timeout", action="store_true",
-                        help="wait for the peer until it answers or the caller stops the run")
+                        help="wait until the peer answers or the caller stops "
+                             "the run (the default; kept for compatibility)")
     run.add_argument("--max-steps", type=int)
     run.add_argument("--require-model")
     run.add_argument("--events-jsonl", action="store_true")
@@ -139,31 +146,46 @@ def _check(args: argparse.Namespace) -> connectors.CheckResult:
     mode = args.mode or "review"
     with _check_directory() as cwd:
         if mode == "work":
-            return connector.check(Deadline(DEFAULT_TIMEOUT_SECONDS), cwd, mode="work")
-        return connector.check(Deadline(DEFAULT_TIMEOUT_SECONDS), cwd)
+            return connector.check(
+                Deadline(READINESS_TIMEOUT_SECONDS), cwd, mode="work"
+            )
+        return connector.check(Deadline(READINESS_TIMEOUT_SECONDS), cwd)
 
 
 def _check_json(args: argparse.Namespace) -> int:
     """One machine-readable readiness result, success or failure alike.
 
-    The object carries the selected peer and mode, usability, the
-    executable/version/platform facts, tri-state authentication and work/image
-    capability, and warnings. It deliberately names no schema version: the
-    field set is the contract. A hard failure still exits nonzero, with the
-    reason and next action inside the object rather than on standard error.
+    The object carries the selected peer and mode, usability, the identity and
+    version of this loaded Bridge copy, whether the local command is present,
+    the executable/version/platform facts, tri-state authentication, the
+    connector's implemented review/work/image actions, the compatibility of
+    the loaded combination, and warnings. The implemented actions are source
+    facts of the connector, so a failed login or a missing command does not
+    erase them. `compatibility` is `supported` when the installed version and
+    platform are inside the connector's exercised release evidence, and
+    `unknown` when they are outside it or nothing established either way;
+    `unsupported` means the requested action is an implemented-but-refused
+    route such as work for a courier-only target. A hard failure still exits
+    nonzero, with the reason and next action inside the object rather than on
+    standard error, and `compatibility` null because it was not established.
+    It deliberately names no schema version: the field set is the contract.
     """
     mode = args.mode or "review"
     result = {
         "peer": args.peer,
         "mode": mode,
+        "bridge_version": VERSION,
         "ready": False,
         "warnings": [],
     }  # type: dict
+    checked = None  # type: Optional[connectors.CheckResult]
+    known_connector = True
     try:
         checked = _check(args)
         result.update(
             {
                 "ready": True,
+                "command_present": True,
                 "executable": checked.executable,
                 "version": checked.version,
                 "platform": checked.platform,
@@ -174,14 +196,6 @@ def _check_json(args: argparse.Namespace) -> int:
                 ),
             }
         )
-        capability = connectors.resolve(args.peer).CAPABILITIES
-        result["work"] = capability.work
-        result["image"] = capability.image
-        result["warnings"] = list(checked.warnings)
-        if capability.work == "unsupported":
-            result["warnings"].append(capability.work_detail)
-        if capability.image == "unsupported":
-            result["warnings"].append(capability.image_detail)
     except BridgeError as error:
         reason, next_action = guidance(error.failure)
         if error.detail:
@@ -190,18 +204,46 @@ def _check_json(args: argparse.Namespace) -> int:
         result["next_action"] = next_action
         if error.failure == Failure.AUTHENTICATION_REQUIRED:
             result["authentication"] = "required"
+        known_connector = error.failure != Failure.UNKNOWN_HARNESS
+        if known_connector:
+            # The command was found whenever the check got past resolving the
+            # program to run; only MISSING_CLI says it was not.
+            result["command_present"] = error.failure != Failure.MISSING_CLI
+    if known_connector:
+        capability = connectors.resolve(args.peer).CAPABILITIES
+        result["review"] = "supported"
+        result["work"] = capability.work
+        result["image"] = capability.image
+        if checked is not None:
+            result["warnings"] = list(checked.warnings)
+        if capability.work == "unsupported":
+            result["warnings"].append(capability.work_detail)
+        if capability.image == "unsupported":
+            result["warnings"].append(capability.image_detail)
+        if mode == "work" and capability.work == "unsupported":
+            result["compatibility"] = "unsupported"
+        elif checked is None:
+            result["compatibility"] = None
+        elif checked.qualified:
+            result["compatibility"] = "supported"
+        else:
+            result["compatibility"] = "unknown"
     sys.stdout.write(json.dumps(result, ensure_ascii=True) + "\n")
     return 0 if result["ready"] else 1
 
 
-def _run(args: argparse.Namespace) -> Optional[str]:
+def _run(args: argparse.Namespace) -> Tuple[int, Optional[str]]:
+    """One turn. On a bounded wait's expiry, exit nonzero having returned
+    control without stopping the peer: the report names the session, the
+    retained request, the peer's process and any session reference, the
+    sanitized partial output, and where the captured output lives on."""
     event_writer = None
     if args.events_jsonl:
         event_writer = _write_stdout
     result = runner.run_turn(
         session_dir=args.session,
         body=_read_body(),
-        timeout_seconds=args.timeout,
+        wait_seconds=args.timeout,
         no_timeout=args.no_timeout,
         warning_writer=lambda warning: sys.stderr.write(
             "Warning: {0}\n".format(warning)
@@ -213,11 +255,18 @@ def _run(args: argparse.Namespace) -> Optional[str]:
         purpose=args.purpose,
         event_writer=event_writer,
     )
-    if args.events_jsonl:
-        # The finished event already carried the response path; the line a
-        # flag-free run prints would only duplicate it on the event stream.
-        return None
-    return result.response_path
+    if not isinstance(result, runner.PendingTurn):
+        if args.events_jsonl:
+            # The finished event already carried the response path; the line a
+            # flag-free run prints would only duplicate it on the event stream.
+            return 0, None
+        return 0, result.response_path
+    evidence = result.detach()
+    if not args.events_jsonl:
+        sys.stderr.write(
+            runner.render_pending(evidence, args.timeout) + "\n"
+        )
+    return 1, None
 
 
 def _record(args: argparse.Namespace) -> str:
@@ -250,9 +299,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 sys.stdout.write("Warning: {0}\n".format(warning))
             return 0
         elif args.command == "run":
-            written = _run(args)
+            status, written = _run(args)
         else:
             written = _record(args)
+            status = 0
     except SignalStop as stopped:
         sys.stderr.write(str(stopped) + "\n")
         return 1
@@ -261,4 +311,4 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     if written is not None:
         _write_stdout(written + "\n")
-    return 0
+    return status

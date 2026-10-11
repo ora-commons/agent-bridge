@@ -1,9 +1,16 @@
-"""One bounded courier call derived entirely from an immutable session.
+"""One courier call derived entirely from an immutable session.
 
 The runner validates the body and connector transport before publishing the
 request. It then starts one fresh target process, publishes one final textual
 answer, and exits. A failed target leaves the truthful request and no invented
 response. There is no retry or implicit history.
+
+Ordinary work has no elapsed-time deadline: the turn waits until the peer
+answers, fails, or somebody stops it. A caller may instead name a bounded
+wait, and that wait never kills anything - when it ends the turn is returned
+to the caller as a `PendingTurn` holding the still-running peer together
+with the retained session evidence, and the caller collects, re-waits,
+cancels, or detaches.
 
 A Format 3 session may be a work session: the runner hands the connector's
 work builder the session's declared directories and explicit attachments,
@@ -33,6 +40,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from typing import (
     Callable,
     Dict,
@@ -53,7 +61,7 @@ from .connectors import (
 )
 from .errors import BridgeError, Failure, guidance
 from .locking import session_lock
-from .peer import Deadline, SignalStop, run_bounded
+from .peer import READINESS_TIMEOUT_SECONDS, Deadline, SignalStop, start_call
 
 NEUTRAL_PREFIX = "agent-bridge-neutral-"
 
@@ -156,8 +164,12 @@ def _remove_neutral(path: str, during: Optional[BaseException]) -> None:
 
 
 @contextlib.contextmanager
-def _target_directory(project: Optional[str]) -> Iterator[str]:
-    """Yield the immutable project, or a task-owned neutral empty directory."""
+def _target_directory(project: Optional[str], retain: Optional[Dict[str, object]] = None) -> Iterator[str]:
+    """Yield the immutable project, or a task-owned neutral empty directory.
+
+    A caller that returns control while its peer still runs leaves the
+    neutral directory in place, because the peer is working in it.
+    """
     if project is not None:
         if not os.path.isdir(project):
             raise BridgeError(
@@ -173,12 +185,15 @@ def _target_directory(project: Optional[str]) -> Iterator[str]:
             Failure.USAGE_ERROR,
             detail="no neutral working directory could be made: {0}".format(exc),
         )
+    keep = retain is not None and bool(retain.get("retain_work"))
     try:
         yield neutral
     except BaseException as exc:
-        _remove_neutral(neutral, exc)
+        if not keep:
+            _remove_neutral(neutral, exc)
         raise
-    _remove_neutral(neutral, None)
+    if not keep:
+        _remove_neutral(neutral, None)
 
 
 def apply_transport(
@@ -225,6 +240,220 @@ class TurnResult(NamedTuple):
     request_sequence: int
     response_sequence: int
     response_path: str
+
+
+class TurnEvidence(NamedTuple):
+    """What a bounded wait or a failure leaves behind for a person to inspect.
+
+    The peer-session reference is the session directory with its published
+    request, plus the vendor session identity when the peer's own output has
+    named one. Progress is the sanitized excerpt of what the peer had said
+    when the evidence was taken - partial work, never a final answer. Fields
+    that are `None` were unavailable, not empty.
+    """
+
+    session_dir: str
+    request_path: Optional[str] = None
+    request_on_disk: Optional[bool] = None
+    peer_pid: Optional[int] = None
+    peer_running: Optional[bool] = None
+    peer_session: Optional[str] = None
+    stdout_progress: Optional[str] = None
+    stderr_progress: Optional[str] = None
+    elapsed_seconds: Optional[float] = None
+    capture_paths: Tuple[str, ...] = ()
+
+
+#: The vendor session identity a peer prints while it works, kept generic
+#: because no connector may interpret another's banner: one labelled
+#: session/thread/conversation id line, nothing else.
+_PEER_SESSION_LINE = re.compile(
+    r"(?im)\b(?:session|thread|conversation)[\s_-]?id\b\s*[:=]\s*"
+    r"([A-Za-z0-9][A-Za-z0-9._-]{7,127})"
+)
+
+
+def _peer_session_reference(*streams: str) -> Optional[str]:
+    for stream in streams:
+        found = _PEER_SESSION_LINE.search(stream)
+        if found is not None:
+            return found.group(1)
+    return None
+
+
+def _evidence(
+    session_dir: str,
+    request_path: Optional[str],
+    body: str,
+    call: Optional["object"] = None,
+) -> TurnEvidence:
+    on_disk = None if request_path is None else os.path.isfile(request_path)
+    if call is None:
+        return TurnEvidence(session_dir=session_dir, request_path=request_path,
+                            request_on_disk=on_disk)
+    stdout, stderr = call.output()
+    return TurnEvidence(
+        session_dir=session_dir,
+        request_path=request_path,
+        request_on_disk=on_disk,
+        peer_pid=call.pid,
+        peer_running=call.running(),
+        peer_session=_peer_session_reference(stderr, stdout),
+        stdout_progress=(
+            _diagnostic_excerpt(stdout, body) if stdout.strip() else None
+        ),
+        stderr_progress=(
+            _diagnostic_excerpt(stderr, body) if stderr.strip() else None
+        ),
+        elapsed_seconds=round(call.elapsed(), 3),
+        capture_paths=tuple(call.paths[1:]),
+    )
+
+
+def _evidence_fields(evidence: TurnEvidence) -> Dict[str, object]:
+    fields = {
+        "session_dir": evidence.session_dir,
+        "request_path": evidence.request_path,
+        "request_on_disk": evidence.request_on_disk,
+        "peer_pid": evidence.peer_pid,
+        "peer_running": evidence.peer_running,
+    }
+    for name in ("peer_session", "stdout_progress", "stderr_progress",
+                 "elapsed_seconds"):
+        value = getattr(evidence, name)
+        if value is not None:
+            fields[name] = value
+    if evidence.capture_paths:
+        fields["capture_paths"] = list(evidence.capture_paths)
+    return fields
+
+
+def render_pending(evidence: TurnEvidence, wait_seconds: float) -> str:
+    """The report a bounded wait leaves when it returns control."""
+    lines = [
+        "The {0:.0f}s wait ended while the peer was still running; the work "
+        "was not stopped.".format(wait_seconds),
+        "Session: {0}".format(evidence.session_dir),
+    ]
+    if evidence.request_path is not None:
+        lines.append(
+            "Request: {0} ({1})".format(
+                evidence.request_path,
+                "on disk" if evidence.request_on_disk else "absent",
+            )
+        )
+    if evidence.peer_pid is not None:
+        lines.append("Peer process: {0}".format(evidence.peer_pid))
+    if evidence.peer_session is not None:
+        lines.append("Peer session: {0}".format(evidence.peer_session))
+    for label, progress in (
+        ("Partial stdout", evidence.stdout_progress),
+        ("Partial stderr", evidence.stderr_progress),
+    ):
+        if progress is not None:
+            lines.append("{0}: {1}".format(label, progress))
+    if evidence.capture_paths:
+        lines.append(
+            "Captured output (retained while the peer runs): {0}".format(
+                ", ".join(evidence.capture_paths)
+            )
+        )
+    lines.append(
+        "Next action: inspect the session and the peer's own record of the "
+        "run, or run the turn again when you can wait for the answer."
+    )
+    return "\n".join(lines)
+
+
+class PendingTurn(object):
+    """A turn whose bounded wait ended with its peer still running.
+
+    The caller holds the turn: `collect` waits for the answer with no bound,
+    `wait` bounds that wait again, `cancel` stops the run and cleans up the
+    processes it owns, and `detach` returns control for good, leaving the
+    peer running with its captured output retained. An abandoned pending
+    turn is closed silently and cleans up.
+    """
+
+    def __init__(self, generator, state: Dict[str, object]) -> None:
+        self._generator = generator
+        self._state = state
+        self._live = True
+
+    @property
+    def session_dir(self) -> str:
+        return self._state["session_dir"]  # type: ignore[return-value]
+
+    @property
+    def request_path(self) -> Optional[str]:
+        return self._state["request_path"]  # type: ignore[return-value]
+
+    @property
+    def peer_pid(self) -> Optional[int]:
+        call = self._state.get("call")
+        return call.pid if call is not None else None
+
+    def evidence(self) -> TurnEvidence:
+        return _evidence(
+            self.session_dir, self.request_path,
+            self._state["body"],  # type: ignore[arg-type]
+            self._state.get("call"),
+        )
+
+    def collect(self) -> TurnResult:
+        return self._resume(None)
+
+    def wait(self, seconds: float):
+        return self._resume(seconds)
+
+    def cancel(self) -> TurnEvidence:
+        evidence = self.evidence()
+        self._state["finish"](
+            "stopped",
+            reason="the run was cancelled by its caller",
+            evidence=evidence,
+        )
+        self._close()
+        return evidence
+
+    def detach(self) -> TurnEvidence:
+        evidence = self.evidence()
+        self._state["retain_work"] = True
+        call = self._state.get("call")
+        if call is not None:
+            call.retain()
+        self._state["finish"](
+            "pending",
+            reason="the bounded wait ended while the peer was still running",
+            evidence=evidence,
+        )
+        self._close()
+        return evidence
+
+    def _resume(self, seconds: Optional[float]):
+        try:
+            self._generator.send(seconds)
+        except StopIteration as finished:
+            self._live = False
+            return finished.value
+        return self
+
+    def _close(self) -> None:
+        if not self._live:
+            return
+        self._live = False
+        try:
+            self._generator.close()
+        except (SignalStop, KeyboardInterrupt):
+            pass
+
+    def __del__(self) -> None:
+        if self._live:
+            self._live = False
+            try:
+                self._generator.close()
+            except BaseException:
+                pass
 
 
 class _EventReporter(object):
@@ -277,7 +506,7 @@ def _validate_attachments(
 def run_turn(
     session_dir: str,
     body: str,
-    timeout_seconds: float,
+    wait_seconds: Optional[float] = None,
     build_command: Optional[CommandBuilder] = None,
     warning_writer: Optional[WarningWriter] = None,
     max_steps: Optional[int] = None,
@@ -288,23 +517,64 @@ def run_turn(
     event_writer: Optional[EventWriter] = None,
     build_work_command: Optional[WorkCommandBuilder] = None,
     no_timeout: bool = False,
-) -> TurnResult:
-    """Publish one request and one response for the session's fixed target."""
+):
+    """Publish one request and one response for the session's fixed target.
+
+    Ordinary work has no elapsed-time deadline: the turn waits until the peer
+    answers, fails, or somebody stops it. `wait_seconds`, when named, is a
+    bounded wait and never a kill - on expiry the call returns a `PendingTurn`
+    holding the still-running peer, the published request, and the evidence
+    collected so far, and the caller may keep waiting, collect the answer,
+    cancel the run, or detach from it. This return contract replaces the
+    `TIMEOUT` exception a caller of the old `timeout_seconds` parameter saw:
+    that parameter no longer exists, so an unupdated caller fails loudly
+    rather than silently changing meaning.
+    """
     try:
-        timeout = float(timeout_seconds)
+        wait = None if wait_seconds is None else float(wait_seconds)
     except (TypeError, ValueError):
         raise BridgeError(Failure.USAGE_ERROR, detail="--timeout must be a number")
-    if not math.isfinite(timeout) or timeout <= 0.0:
+    if wait is not None and (not math.isfinite(wait) or wait <= 0.0):
         raise BridgeError(
             Failure.USAGE_ERROR, detail="--timeout must be greater than zero"
+        )
+    if no_timeout and wait is not None:
+        raise BridgeError(
+            Failure.USAGE_ERROR,
+            detail="--no-timeout cannot be combined with --timeout",
         )
     if not body or not body.strip():
         raise BridgeError(
             Failure.USAGE_ERROR,
             detail="there was no message to send on standard input",
         )
+    generator = _turn(
+        session_dir, body, wait, build_command, warning_writer, max_steps,
+        required_model, attachments, note_ref, purpose, event_writer,
+        build_work_command,
+    )
+    try:
+        outcome = generator.send(None)
+    except StopIteration as finished:
+        return finished.value
+    return PendingTurn(generator, outcome)
 
-    deadline = Deadline(math.inf if no_timeout else timeout)
+
+def _turn(
+    session_dir: str,
+    body: str,
+    wait: Optional[float],
+    build_command: Optional[CommandBuilder],
+    warning_writer: Optional[WarningWriter],
+    max_steps: Optional[int],
+    required_model: Optional[str],
+    attachments: Sequence[str],
+    note_ref: Optional[str],
+    purpose: Optional[str],
+    event_writer: Optional[EventWriter],
+    build_work_command: Optional[WorkCommandBuilder],
+):
+    """One whole turn as a generator: a bounded wait suspends it mid-turn."""
     record = session_module.read_session(session_dir)
     has_minimax_options = max_steps is not None or required_model is not None
     if has_minimax_options and record.peer != "minimax":
@@ -369,6 +639,17 @@ def run_turn(
     )
     published_request = None  # type: Optional[str]
     turn_warnings = []  # type: List[str]
+    # The mutable state a suspended turn shares with its PendingTurn.
+    state = {
+        "session_dir": session_dir,
+        "request_path": None,
+        "body": body,
+        "call": None,
+        "retain_work": False,
+        "failure_evidence": None,
+        "finish": None,
+    }
+    turn_started = time.monotonic()
 
     def report(event: Dict[str, object]) -> None:
         if events is not None:
@@ -387,39 +668,59 @@ def run_turn(
 
         return beat
 
-    def finished_failure(exc: BaseException) -> None:
-        if isinstance(exc, (SignalStop, KeyboardInterrupt)):
-            outcome = "stopped"
-            detail = {
-                "outcome": outcome,
-                "reason": str(exc) or exc.__class__.__name__,
-            }
-        else:
-            outcome = "failure"
-            if isinstance(exc, BridgeError):
-                reason, next_action = guidance(exc.failure)
-                if exc.detail:
-                    reason = "{0} ({1})".format(reason, exc.detail)
-            else:
-                reason = str(exc) or exc.__class__.__name__
-                next_action = (
-                    "Inspect the session's visible state before deciding "
-                    "whether to run the command again."
-                )
-            detail = {
-                "outcome": outcome,
-                "reason": reason,
-                "next_action": next_action,
-            }
+    finish_state = {"emitted": False}
+
+    def emit_finished(
+        outcome: str,
+        reason: Optional[str] = None,
+        next_action: Optional[str] = None,
+        evidence: Optional[TurnEvidence] = None,
+    ) -> None:
+        if finish_state["emitted"]:
+            return
+        finish_state["emitted"] = True
         event = {
             "event": "finished",
             "phase": "run",
+            "outcome": outcome,
             "warnings": list(turn_warnings),
         }
-        event.update(detail)
+        if reason is not None:
+            event["reason"] = reason
+            if next_action is not None:
+                event["next_action"] = next_action
         if published_request is not None:
             event["request_path"] = published_request
+        if evidence is not None:
+            event.update(_evidence_fields(evidence))
         report(event)
+
+    state["finish"] = emit_finished
+
+    def finished_failure(exc: BaseException) -> None:
+        evidence = state["failure_evidence"] or _evidence(
+            session_dir, published_request, body
+        )
+        if isinstance(exc, (SignalStop, KeyboardInterrupt, GeneratorExit)):
+            # GeneratorExit is an abandoned pending turn being closed: its
+            # cleanup ran, so it left as a stop, not a failure.
+            emit_finished(
+                "stopped",
+                reason=str(exc) or exc.__class__.__name__,
+                evidence=evidence,
+            )
+            return
+        if isinstance(exc, BridgeError):
+            reason, next_action = guidance(exc.failure)
+            if exc.detail:
+                reason = "{0} ({1})".format(reason, exc.detail)
+        else:
+            reason = str(exc) or exc.__class__.__name__
+            next_action = (
+                "Inspect the session's visible state before deciding "
+                "whether to run the command again."
+            )
+        emit_finished("failure", reason, next_action, evidence)
 
     try:
         report(
@@ -431,7 +732,16 @@ def run_turn(
             }
         )
         with session_lock(session_dir):
-            with _target_directory(record.project) as cwd:
+            with _target_directory(record.project, state) as cwd:
+                # Readiness keeps a bounded deadline of its own; the work
+                # itself gets none. A named wait also bounds readiness, so a
+                # hanging precheck cannot outlive the caller's patience.
+                deadline = Deadline(
+                    READINESS_TIMEOUT_SECONDS
+                    if wait is None
+                    else min(wait, READINESS_TIMEOUT_SECONDS),
+                    work_seconds=math.inf,
+                )
                 deadline.check("composing the peer command")
                 deadline.heartbeat = heartbeat("prerequisites")
                 if record.mode == "work":
@@ -489,21 +799,46 @@ def run_turn(
                         attachments=declared_attachments,
                     ),
                 )
+                state["request_path"] = published_request
 
                 deadline.heartbeat = heartbeat("peer-call")
-                call = run_bounded(
+                with start_call(
                     argv=argv,
                     cwd=command.cwd,
                     env=command.env,
                     stdin_text=stdin_text,
-                    deadline=deadline,
-                )
-                if call.returncode != 0:
+                ) as call:
+                    state["call"] = call
+                    try:
+                        next_wait = (
+                            None
+                            if wait is None
+                            else max(
+                                0.0, wait - (time.monotonic() - turn_started)
+                            )
+                        )
+                        while True:
+                            if call.wait(next_wait, heartbeat=deadline.heartbeat):
+                                break
+                            expiry = _evidence(
+                                session_dir, published_request, body, call
+                            )
+                            event = {"event": "wait_expired", "phase": "peer-call"}
+                            event.update(_evidence_fields(expiry))
+                            report(event)
+                            next_wait = yield state
+                        peer_call = call.outcome()
+                    except BaseException:
+                        state["failure_evidence"] = _evidence(
+                            session_dir, published_request, body, call
+                        )
+                        raise
+                if peer_call.returncode != 0:
                     raise BridgeError(
                         Failure.PEER_FAILURE,
-                        detail=_peer_failure_detail(call, command, body),
+                        detail=_peer_failure_detail(peer_call, command, body),
                     )
-                response = call.stdout
+                response = peer_call.stdout
                 provider = None  # type: Optional[str]
                 model = None  # type: Optional[str]
                 if command.response_parser is not None:

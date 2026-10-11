@@ -90,8 +90,8 @@ WORK_WARNING = (
     "engine and by surviving user/provider configuration; ask is interactive "
     "and rejected by mcode exec, which names the TUI or ACP as its route, "
     "and full and off are approval bypasses Bridge never selects. No "
-    "assistant-step bound is imposed unless --max-steps names one, so the "
-    "turn deadline is the only outer bound. Writes are confined by nothing "
+    "assistant-step bound is imposed unless --max-steps names one; the "
+    "caller's stop and cancellation are the only outer bound. Writes are confined by nothing "
     "except that policy; treat the working and access directories as "
     "writable."
 )
@@ -213,7 +213,7 @@ def _prerequisites(
     help_call = connectors.probe((program, "exec", "--help"), cwd, deadline)
     if work:
         switches = WORK_RESTRICTIONS
-        if deadline.seconds <= MAX_NATIVE_TIMEOUT_MILLISECONDS / 1000.0:
+        if deadline.work_seconds <= MAX_NATIVE_TIMEOUT_MILLISECONDS / 1000.0:
             switches += WORK_TIMEOUT_RESTRICTION
         if attachments:
             switches += WORK_ATTACHMENT_RESTRICTIONS
@@ -276,17 +276,19 @@ def build_command(
     program, _version, _described, _account, warnings = _prerequisites(
         deadline, cwd
     )
-    # MiniMax starts this timer after Bridge's deadline. Rounding up means the
-    # native timer cannot win; above Node's timer domain it is omitted so a
-    # valid Bridge timeout is never rejected or shortened by the child.
+    # MiniMax starts this timer after this process starts. It is keyed to the
+    # work bound, never the readiness bound: an ordinary turn - whose work has
+    # no deadline - passes no native kill at all, and a bounded vector's
+    # duration is rounded up so the native timer cannot win; above Node's
+    # timer domain it is omitted.
     native_timeout = (
         (
             "--timeout",
             "{0}ms".format(
-                max(1, int(math.ceil(deadline.seconds * 1000.0)))
+                max(1, int(math.ceil(deadline.work_seconds * 1000.0)))
             ),
         )
-        if deadline.seconds
+        if deadline.work_seconds
         <= MAX_NATIVE_TIMEOUT_MILLISECONDS / 1000.0
         else ()
     )
@@ -342,8 +344,8 @@ def build_work_command(
     bypasses Bridge never selects, so there is no configured posture this
     vector could be silently replacing. The review call's one-assistant-step
     bound is not imposed: `--max-steps` is passed only when the caller names
-    a bound, and otherwise MiniMax's own default governs the run inside
-    Bridge's deadline. Each attachment becomes one `--file`, which mcode
+    a bound, and otherwise MiniMax's own default governs the run; Bridge sets
+    no deadline of its own. Each attachment becomes one `--file`, which mcode
     hands to the model as image content. Declared access directories are
     recorded in the session and stay reachable as ordinary same-user paths;
     mcode has no per-call switch that widens its workspace.
@@ -356,10 +358,10 @@ def build_work_command(
         (
             "--timeout",
             "{0}ms".format(
-                max(1, int(math.ceil(deadline.seconds * 1000.0)))
+                max(1, int(math.ceil(deadline.work_seconds * 1000.0)))
             ),
         )
-        if deadline.seconds
+        if deadline.work_seconds
         <= MAX_NATIVE_TIMEOUT_MILLISECONDS / 1000.0
         else ()
     )
