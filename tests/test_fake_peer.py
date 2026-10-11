@@ -3328,6 +3328,25 @@ class CommandLineBody(unittest.TestCase):
                 self.assertIn(expected, str(caught.exception))
                 self.assertEqual(self._messages(), [])
 
+    def test_the_environment_is_measured_in_the_bytes_a_process_would_get(
+        self,
+    ):
+        """Undecodable environment bytes are counted, not crashed on.
+
+        A real environment can carry surrogate-escaped bytes that strict
+        UTF-8 refuses, because the operating system hands them to every new
+        process anyway. Measuring them the way process creation does - the
+        platform filesystem encoding - returns the kernel-level byte count:
+        two arguments of six and three bytes, a one-byte name, a value whose
+        escaped surrogate is one byte, and a pointer per string plus two.
+        """
+        measured = connectors.argument_space_used(
+            ("bridge", "run"), (("X", "\udc80abc"),)
+        )
+        self.assertEqual(
+            measured, (6 + 1) + (3 + 1) + (1 + 4 + 2) + 8 * (3 + 2)
+        )
+
     def test_a_courier_only_peer_is_refused_a_project_before_anything_starts(
         self,
     ):

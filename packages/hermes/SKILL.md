@@ -24,11 +24,14 @@ another adapter.
 Run every command with Hermes's terminal tool and wait for it in the foreground.
 Do not hand a Bridge command to a subagent, detach it, or start a poller.
 
-Hermes's terminal tool caps a foreground wait at 600 seconds. For a real `run`,
-pass Bridge `--timeout 540` so the command returns just before that cap; Bridge
-sets no timeout of its own and never kills the target - at 540 seconds it
-returns control, leaves the target running, and reports where its retained
-work and session record can be inspected.
+A real `run` passes no `--timeout`. Bridge waits until the target answers,
+fails, or is stopped, and never kills the target on a clock. Hermes's terminal
+tool caps a foreground wait at 600 seconds; a request above that cap is not
+refused or killed - the terminal carries the command itself as a tracked
+background process and reports its completion. When a run may outlive the
+cap, ask the terminal for a wait above it and collect the result through the
+terminal's own `process` poll/wait when it reports. An expiring wait never
+kills the work, and Bridge's session record retains the exchange either way.
 
 ## Boundary
 
@@ -132,14 +135,16 @@ Write the body to a task-owned temporary file outside the session and supply it
 on standard input to:
 
 ```text
-python3 -m bridge run --session <absolute-session-directory> --timeout 540 < /absolute/path/to/outgoing-body.md
+python3 -m bridge run --session <absolute-session-directory> < /absolute/path/to/outgoing-body.md
 ```
 
 Before starting, tell the user which target will be called and which session
 folder will receive the record. A real call can take minutes and consume the
-target harness's quota. Keep the terminal attached for its full 600-second
-wait. Surface each `Warning:` line from standard error as it arrives; it does
-not require an acknowledgment and must not be suppressed.
+target harness's quota. Wait for the run to complete - it sets no clock
+deadline, and a run that outlives the terminal's foreground cap is carried by
+the terminal's tracked-process mechanism and reported on completion. Surface
+each `Warning:` line from standard error as it arrives; it does not require an
+acknowledgment and must not be suppressed.
 
 On success, standard output is the absolute path of the response record. Delete
 the temporary outgoing-body file, read the response at that path, and return
