@@ -329,9 +329,11 @@ def parse_response(output: str) -> str:
         )
 
     failures = []  # type: List[str]
+    turn_failed = False
     for event in events:
         if event.get("type") not in ("turn.failed", "error"):
             continue
+        turn_failed = turn_failed or event.get("type") == "turn.failed"
         error = event.get("error")
         if isinstance(error, dict):
             message = error.get("message")
@@ -344,7 +346,7 @@ def parse_response(output: str) -> str:
         )
         if detail not in failures:
             failures.append(detail)
-    if failures:
+    if turn_failed:
         # Preserve the complete vendor reason. The runner removes request and
         # credential lines after JSON decoding, before showing this detail.
         raise BridgeError(
@@ -383,17 +385,18 @@ def parse_response(output: str) -> str:
                     # A later partial agent message invalidates an earlier
                     # completed commentary message as the final answer.
                     answer = item.get("text") if kind == "item.completed" else None
-    if not completed:
-        raise BridgeError(
-            Failure.PEER_FAILURE,
-            detail="codex did not report a completed turn; no answer was published",
-        )
-    if not isinstance(answer, str) or not answer.strip():
-        raise BridgeError(
-            Failure.PEER_FAILURE,
-            detail="codex completed without a final agent message",
-        )
-    return answer
+    if completed and isinstance(answer, str) and answer.strip():
+        # Codex also emits top-level error notices for recoverable retries,
+        # without exposing will_retry in JSONL. The completed turn and the
+        # runner's zero-exit check, not an earlier notice, establish success.
+        return answer
+    detail = (
+        "codex did not report a completed turn; no answer was published"
+        if not completed else "codex completed without a final agent message"
+    )
+    if failures:
+        detail += "; codex reported: " + "\n".join(failures)
+    raise BridgeError(Failure.PEER_FAILURE, detail=detail)
 
 
 def _prerequisites(

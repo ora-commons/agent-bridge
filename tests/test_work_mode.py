@@ -1412,6 +1412,7 @@ class CodexStructuredDispatch(unittest.TestCase):
         self._stream([
             {"type": "thread.started", "thread_id": "thread-fixture"},
             {"type": "turn.started"},
+            {"type": "error", "message": "Reconnecting after a recoverable stream error"},
             {"type": "future.progress", "text": "future output is not the answer"},
             {"type": "item.completed", "item": {
                 "id": "commentary", "type": "agent_message", "text": "Intermediate commentary"}},
@@ -1429,6 +1430,15 @@ class CodexStructuredDispatch(unittest.TestCase):
             with self.subTest(mode=mode):
                 result = runner.run_turn(self._session("success-" + mode, mode), "Answer once.\n")
                 self.assertEqual(self._body(result), final)
+        os.environ["BRIDGE_FAKE_CODEX_EXIT"] = "1"
+        for mode in ("work", "review"):
+            with self.subTest(mode=mode, exit_code=1):
+                session_dir = self._session("nonzero-" + mode, mode)
+                with self.assertRaises(BridgeError) as caught:
+                    runner.run_turn(session_dir, "Answer once.\n")
+                self.assertEqual(caught.exception.failure, Failure.PEER_FAILURE)
+                self.assertIn("exit 1", caught.exception.detail)
+                self.assertEqual(os.listdir(session.messages_dir(session_dir)), ["0001-initiator-to-peer.md"])
 
     def test_actual_rejection_survives_warning_floods_without_replay_or_private_echoes(self):
         body = "PRIVATE REQUEST café\nSECOND PRIVATE LINE\n"
@@ -1476,7 +1486,7 @@ class CodexStructuredDispatch(unittest.TestCase):
             "tool-only": [{"type": "item.completed", "item": {
                 "id": "tool", "type": "command_execution", "aggregated_output": "Tool output"}}, completed],
             "failed": [answer, {"type": "turn.failed", "error": {"message": "Actual failure"}}],
-            "error": [answer, {"type": "error", "message": "Actual failure"}, completed],
+            "error-unfinished": [answer, {"type": "error", "message": "Actual failure"}],
             "duplicate-completion": [answer, completed, completed],
             "duplicate-start": [{"type": "turn.started"}, {"type": "turn.started"}, answer, completed],
             "late-start": [answer, {"type": "turn.started"}, completed],
@@ -1496,19 +1506,24 @@ class CodexStructuredDispatch(unittest.TestCase):
     def test_zero_exit_failure_reason_is_complete_and_redacted_after_json_decode(self):
         body = "PRIVATE REQUEST\n秘密の依頼\n"
         reason = "Detailed failure. " * 100 + "REASON END"
-        self._stream([{"type": "turn.failed", "error": {"message": (
-            reason + "\n" + body + "Authorization: Bearer opaque-private-key\n"
-        )}}])
-        for mode in ("work", "review"):
-            with self.subTest(mode=mode):
-                with self.assertRaises(BridgeError) as caught:
-                    runner.run_turn(self._session("decoded-error-" + mode, mode), body)
-                detail = caught.exception.detail
-                self.assertIn(reason, detail)
-                self.assertIn("request body redacted", detail)
-                self.assertIn("credential line redacted", detail)
-                for private in ("PRIVATE REQUEST", "秘密の依頼", "opaque-private-key"):
-                    self.assertNotIn(private, detail)
+        message = reason + "\n" + body + "Authorization: Bearer opaque-private-key\n"
+        streams = {
+            "failed": [{"type": "turn.failed", "error": {"message": message}}],
+            "unfinished": [{"type": "error", "message": message}],
+            "no-answer": [{"type": "error", "message": message}, {"type": "turn.completed"}],
+        }
+        for name, events in streams.items():
+            self._stream(events)
+            for mode in ("work", "review"):
+                with self.subTest(stream=name, mode=mode):
+                    with self.assertRaises(BridgeError) as caught:
+                        runner.run_turn(self._session("decoded-error-" + name + "-" + mode, mode), body)
+                    detail = caught.exception.detail
+                    self.assertIn(reason, detail)
+                    self.assertIn("request body redacted", detail)
+                    self.assertIn("credential line redacted", detail)
+                    for private in ("PRIVATE REQUEST", "秘密の依頼", "opaque-private-key"):
+                        self.assertNotIn(private, detail)
 
     def test_malformed_stream_does_not_publish_a_candidate_answer(self):
         self._stream([
