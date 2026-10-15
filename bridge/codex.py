@@ -14,11 +14,12 @@ instead of the review set, which a work vector passes none of), because a turn
 that skipped them would find out about a missing sign-in or a renamed switch in
 the middle of real work, with the peer already running.
 
-**How the answer comes back.** `codex exec` puts its banner, the prompt it was
-handed, its warnings and its errors on the error stream, and puts only the final
-agent message on standard output. That separation is what lets the runner
-publish what it captured as the peer's reply, word for word, without editing
-anything out of it. The prompt travels the other way, on standard input, and the
+**How the answer comes back.** `codex exec --json` emits structured events on
+standard output. Only the last completed agent message from a successfully
+completed turn is an answer; tool output, partial messages, errors, and failed
+or unfinished turns are never published. Errors in those events supply the
+failure reason even when the error stream is full of unrelated warnings.
+The prompt travels the other way, on standard input, and the
 lone `-` says so out loud: with no prompt argument Codex would read standard
 input anyway, and naming it is what makes the handover deliberate rather than
 incidental.
@@ -73,6 +74,7 @@ SPDX-License-Identifier: CC0-1.0
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import List, Optional, Sequence, Tuple
@@ -102,6 +104,7 @@ QUALIFICATION = connectors.Qualification(
         "--sandbox",
         "--skip-git-repo-check",
         "--cd",
+        "--json",
     ),
 )
 
@@ -158,7 +161,7 @@ CAPABILITIES = connectors.Capabilities(
 #: those switches - and neither are `--add-dir` or `--image` unless the
 #: session declares an access directory or sends an attachment, because a
 #: plain work turn passes neither.
-WORK_RESTRICTIONS = ("--skip-git-repo-check", "--cd")
+WORK_RESTRICTIONS = ("--skip-git-repo-check", "--cd", "--json")
 WORK_ACCESS_RESTRICTIONS = ("--add-dir",)
 WORK_ATTACHMENT_RESTRICTIONS = ("--image",)
 
@@ -304,6 +307,95 @@ def _work_warning(posture: str, origin: str) -> str:
     )
 
 
+def parse_response(output: str) -> str:
+    """Read one Codex JSONL turn without treating intermediate work as a reply.
+
+    Unknown event and item types are harmless additions to the stream. The
+    known completion and failure events still decide whether any final answer
+    may be published. Only an agent message completed before the one successful
+    terminal event can supply that answer.
+    """
+    try:
+        events = [json.loads(line) for line in output.splitlines() if line.strip()]
+    except ValueError:
+        raise BridgeError(
+            Failure.PEER_FAILURE,
+            detail="codex returned unreadable JSON events",
+        ) from None
+    if not events or any(not isinstance(event, dict) for event in events):
+        raise BridgeError(
+            Failure.PEER_FAILURE,
+            detail="codex returned no readable JSON event sequence",
+        )
+
+    failures = []  # type: List[str]
+    for event in events:
+        if event.get("type") not in ("turn.failed", "error"):
+            continue
+        error = event.get("error")
+        if isinstance(error, dict):
+            message = error.get("message")
+        elif isinstance(error, str):
+            message = error
+        else:
+            message = event.get("message")
+        detail = message if isinstance(message, str) and message.strip() else (
+            "codex reported {0} without a readable reason".format(event["type"])
+        )
+        if detail not in failures:
+            failures.append(detail)
+    if failures:
+        # Preserve the complete vendor reason. The runner removes request and
+        # credential lines after JSON decoding, before showing this detail.
+        raise BridgeError(
+            Failure.PEER_FAILURE,
+            detail="codex reported failure: " + "\n".join(failures),
+        )
+
+    answer = None  # type: Optional[str]
+    started = False
+    completed = False
+    for event in events:
+        kind = event.get("type")
+        if kind == "turn.completed":
+            if completed:
+                raise BridgeError(
+                    Failure.PEER_FAILURE,
+                    detail="codex returned more than one completed turn",
+                )
+            completed = True
+        elif kind in ("turn.started", "item.started", "item.updated", "item.completed"):
+            if completed:
+                raise BridgeError(
+                    Failure.PEER_FAILURE,
+                    detail="codex returned turn activity after completion",
+                )
+            if kind == "turn.started":
+                if started or answer is not None:
+                    raise BridgeError(
+                        Failure.PEER_FAILURE,
+                        detail="codex returned more than one turn or a late turn start",
+                    )
+                started = True
+            else:
+                item = event.get("item")
+                if isinstance(item, dict) and item.get("type") == "agent_message":
+                    # A later partial agent message invalidates an earlier
+                    # completed commentary message as the final answer.
+                    answer = item.get("text") if kind == "item.completed" else None
+    if not completed:
+        raise BridgeError(
+            Failure.PEER_FAILURE,
+            detail="codex did not report a completed turn; no answer was published",
+        )
+    if not isinstance(answer, str) or not answer.strip():
+        raise BridgeError(
+            Failure.PEER_FAILURE,
+            detail="codex completed without a final agent message",
+        )
+    return answer
+
+
 def _prerequisites(
     deadline: Deadline,
     cwd: str,
@@ -328,7 +420,7 @@ def _prerequisites(
     the program is, which version answered, and how this computer describes itself.
     """
     warnings = []  # type: List[str]
-    program = connectors.executable(QUALIFICATION.cli_identity)
+    program = os.path.realpath(connectors.executable(QUALIFICATION.cli_identity))
     version = connectors.qualified_version(
         connectors.probe((program, "--version"), cwd, deadline).stdout,
         QUALIFICATION,
@@ -385,8 +477,13 @@ def check(
     program, version, described, warnings = _prerequisites(
         deadline, cwd, work=(mode == "work")
     )
-    return connectors.readiness(
+    checked = connectors.readiness(
         HARNESS_ID, program, version, described, "signed in", warnings
+    )
+    return checked._replace(
+        message=checked.message.replace("codex is ready", "codex transport is ready", 1)
+        + " Selected model acceptance is unverified; no model call was made.",
+        selected_model_verified=False,
     )
 
 
@@ -408,6 +505,7 @@ def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
         argv=(
             program,
             "exec",
+            "--json",
             "--ignore-user-config",
             "-c",
             "web_search=disabled",
@@ -435,6 +533,8 @@ def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
         cwd=cwd,
         env=connectors.environment(),
         warnings=warnings,
+        response_parser=parse_response,
+        complete_failure_reason=True,
     )
 
 
@@ -482,6 +582,7 @@ def build_work_command(
     argv = [
         program,
         "exec",
+        "--json",
         "--skip-git-repo-check",
         "--cd",
         cwd,
@@ -496,4 +597,6 @@ def build_work_command(
         cwd=cwd,
         env=connectors.environment(),
         warnings=warnings,
+        response_parser=parse_response,
+        complete_failure_reason=True,
     )

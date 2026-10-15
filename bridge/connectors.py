@@ -163,7 +163,9 @@ class PeerCommand(NamedTuple):
     identity attached - and the runner carries that identity to the extended
     result surfaces. `stdin_encoder` wraps the unchanged body in a vendor
     input frame before publication when the selected CLI requires one; it
-    never changes the canonical request.
+    never changes the canonical request. `complete_failure_reason` keeps a
+    parsed failure reason complete after request and credential redaction;
+    raw stream diagnostics still use their existing safe excerpts.
     """
 
     argv: Tuple[str, ...]
@@ -173,6 +175,7 @@ class PeerCommand(NamedTuple):
     warnings: Tuple[str, ...] = ()
     response_parser: Optional[Callable[[str], str]] = None
     stdin_encoder: Optional[Callable[[str], str]] = None
+    complete_failure_reason: bool = False
 
 
 class CheckResult(NamedTuple):
@@ -185,7 +188,9 @@ class CheckResult(NamedTuple):
     answered, how this computer describes itself, whether live authentication
     was actually established, and whether that version and platform fall
     inside the connector's exercised release evidence. `qualified` is `None`
-    when nothing established it either way.
+    when nothing established it either way. `selected_model_verified` is
+    absent (`None`) unless a connector reports that fact; `False` means the
+    readiness check did not establish live acceptance of the selected model.
     """
 
     message: str
@@ -195,6 +200,7 @@ class CheckResult(NamedTuple):
     platform: Optional[str] = None
     authentication_confirmed: bool = True
     qualified: Optional[bool] = None
+    selected_model_verified: Optional[bool] = None
 
 
 class Capabilities(NamedTuple):

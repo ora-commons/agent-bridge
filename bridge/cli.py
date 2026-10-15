@@ -196,6 +196,8 @@ def _check_json(args: argparse.Namespace) -> int:
                 ),
             }
         )
+        if checked.selected_model_verified is not None:
+            result["selected_model_verified"] = checked.selected_model_verified
     except BridgeError as error:
         reason, next_action = guidance(error.failure)
         if error.detail:

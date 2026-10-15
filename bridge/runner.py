@@ -132,7 +132,7 @@ def _peer_failure_detail(call, command: PeerCommand, body: str) -> str:
             if parsed.failure == Failure.PEER_FAILURE:
                 parts.append(
                     "structured stdout failure: {0}".format(
-                        _diagnostic_excerpt(parsed.detail or str(parsed), body)
+                        _structured_failure_detail(parsed, command, body)
                     )
                 )
     parts.extend(
@@ -142,6 +142,14 @@ def _peer_failure_detail(call, command: PeerCommand, body: str) -> str:
         )
     )
     return "; ".join(parts)
+
+
+def _structured_failure_detail(error: BridgeError, command: PeerCommand, body: str) -> str:
+    """Keep the selected connector's reason policy and the shared redaction."""
+    detail = error.detail or str(error)
+    if command.complete_failure_reason:
+        return json.dumps(_redact_diagnostic(detail, body), ensure_ascii=True)
+    return _diagnostic_excerpt(detail, body)
 
 
 def _remove_neutral(path: str, during: Optional[BaseException]) -> None:
@@ -847,9 +855,7 @@ def _turn(
                     except BridgeError as parsed:
                         raise BridgeError(
                             parsed.failure,
-                            detail=_diagnostic_excerpt(
-                                parsed.detail or str(parsed), body
-                            ),
+                            detail=_structured_failure_detail(parsed, command, body),
                         ) from None
                     if isinstance(response, connectors.AttributedText):
                         # The tool's own structured output named which
