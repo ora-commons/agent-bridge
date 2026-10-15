@@ -1361,7 +1361,7 @@ class CodexStructuredDispatch(unittest.TestCase):
 
     def _stream(self, events, exit_code=0):
         with open(self.events, "w", encoding="utf-8") as stream:
-            stream.write("\n".join(json.dumps(event) for event in events) + "\n")
+            stream.write("\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n")
         os.environ["BRIDGE_FAKE_CODEX_EVENTS"] = self.events
         os.environ["BRIDGE_FAKE_CODEX_EXIT"] = str(exit_code)
 
@@ -1408,7 +1408,7 @@ class CodexStructuredDispatch(unittest.TestCase):
                 self.assertIs(result.selected_model_verified, False)
 
     def test_both_modes_publish_only_complete_final_text_despite_warning_floods(self):
-        final = "The final answer — café.\n" + "Full answer content. " * 200
+        final = "The final answer — café.\u0085Next line.\u2028Line separator.\u2029Paragraph separator.\n" + "Full answer content. " * 200
         self._stream([
             {"type": "thread.started", "thread_id": "thread-fixture"},
             {"type": "turn.started"},
@@ -1444,6 +1444,7 @@ class CodexStructuredDispatch(unittest.TestCase):
         body = "PRIVATE REQUEST café\nSECOND PRIVATE LINE\n"
         refusal = (
             "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account. "
+            + "\u0085Next line.\u2028Line separator.\u2029Paragraph separator. "
             + "Vendor explanation. " * 80 + "ACTIONABLE END"
         )
         message = refusal + "\n" + body + "api_key=opaque-private-key\n"
@@ -1461,14 +1462,20 @@ class CodexStructuredDispatch(unittest.TestCase):
                     runner.run_turn(session_dir, body, event_writer=lambda line: events.append(json.loads(line)))
                 detail = caught.exception.detail
                 self.assertEqual(caught.exception.failure, Failure.PEER_FAILURE)
-                self.assertIn(refusal, detail)
+                decoded_detail, _ = json.JSONDecoder().raw_decode(
+                    detail.split("structured stdout failure: ", 1)[1]
+                )
+                self.assertIn(refusal, decoded_detail)
                 self.assertIn("request body redacted", detail)
                 self.assertIn("credential line redacted", detail)
                 for private in ("PRIVATE REQUEST", "SECOND PRIVATE LINE", "opaque-private-key"):
                     self.assertNotIn(private, detail)
                     self.assertNotIn(private, events[-1]["reason"])
                 self.assertEqual(events[-1]["outcome"], "failure")
-                self.assertIn(refusal, events[-1]["reason"])
+                decoded_event_reason, _ = json.JSONDecoder().raw_decode(
+                    events[-1]["reason"].split("structured stdout failure: ", 1)[1]
+                )
+                self.assertIn(refusal, decoded_event_reason)
                 self.assertEqual(os.listdir(session.messages_dir(session_dir)), ["0001-initiator-to-peer.md"])
         with open(self.log, encoding="utf-8") as stream:
             self.assertEqual(len(stream.readlines()), 2)
@@ -1505,7 +1512,7 @@ class CodexStructuredDispatch(unittest.TestCase):
 
     def test_zero_exit_failure_reason_is_complete_and_redacted_after_json_decode(self):
         body = "PRIVATE REQUEST\n秘密の依頼\n"
-        reason = "Detailed failure. " * 100 + "REASON END"
+        reason = "Detailed failure. " * 100 + "\u0085Next line.\u2028Line separator.\u2029Paragraph separator. REASON END"
         message = reason + "\n" + body + "Authorization: Bearer opaque-private-key\n"
         streams = {
             "failed": [{"type": "turn.failed", "error": {"message": message}}],
@@ -1518,7 +1525,7 @@ class CodexStructuredDispatch(unittest.TestCase):
                 with self.subTest(stream=name, mode=mode):
                     with self.assertRaises(BridgeError) as caught:
                         runner.run_turn(self._session("decoded-error-" + name + "-" + mode, mode), body)
-                    detail = caught.exception.detail
+                    detail = json.loads(caught.exception.detail)
                     self.assertIn(reason, detail)
                     self.assertIn("request body redacted", detail)
                     self.assertIn("credential line redacted", detail)

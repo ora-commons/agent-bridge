@@ -316,7 +316,7 @@ def parse_response(output: str) -> str:
     terminal event can supply that answer.
     """
     try:
-        events = [json.loads(line) for line in output.splitlines() if line.strip()]
+        events = [json.loads(line) for line in output.split("\n") if line.strip()]
     except ValueError:
         raise BridgeError(
             Failure.PEER_FAILURE,
