@@ -1291,6 +1291,263 @@ class ReadinessAndSupport(unittest.TestCase):
                 )
 
 
+class CodexStructuredDispatch(unittest.TestCase):
+    """The launched Codex owns model discovery; structured results own success."""
+
+    def setUp(self):
+        self.temp = tempfile.mkdtemp(prefix="agent-bridge-codex-dispatch-")
+        self.addCleanup(shutil.rmtree, self.temp, ignore_errors=True)
+        self.codex_home = os.path.join(self.temp, "codex-home")
+        self.bin = os.path.join(self.temp, "bin")
+        os.makedirs(self.codex_home)
+        os.makedirs(self.bin)
+        self.program = os.path.join(self.temp, "installed-codex")
+        self.log = os.path.join(self.temp, "launches.jsonl")
+        self.events = os.path.join(self.temp, "events.jsonl")
+        help_text = "\n".join(codex.QUALIFICATION.restrictions)
+        with open(self.program, "w", encoding="utf-8") as stream:
+            stream.write(
+                "#!" + sys.executable + "\n"
+                "import json, os, sys\n"
+                "args = sys.argv[1:]\n"
+                "if args == ['--version']:\n"
+                "    print('codex-cli 0.155.1')\n"
+                "elif args == ['login', 'status']:\n"
+                "    print('Logged in using ChatGPT', file=sys.stderr)\n"
+                "elif args == ['exec', '--help']:\n"
+                "    print(" + repr(help_text) + ")\n"
+                "else:\n"
+                "    assert args[0] == 'exec' and '--json' in args\n"
+                "    body = sys.stdin.read()\n"
+                "    with open(os.environ['BRIDGE_FAKE_CODEX_LOG'], 'a') as out:\n"
+                "        out.write(json.dumps({'argv': args, 'body': body}) + '\\n')\n"
+                "    if os.environ.get('BRIDGE_FAKE_CODEX_WARNINGS'):\n"
+                "        sys.stderr.write('unrelated startup warning\\n' * 2000)\n"
+                "    source = os.environ.get('BRIDGE_FAKE_CODEX_EVENTS')\n"
+                "    if source:\n"
+                "        with open(source, encoding='utf-8') as data:\n"
+                "            sys.stdout.write(data.read())\n"
+                "    else:\n"
+                "        with open(os.path.join(os.environ['CODEX_HOME'], 'config.toml')) as config:\n"
+                "            model = json.loads(config.read().split('=', 1)[1].strip())\n"
+                "        print(json.dumps({'type': 'item.completed', 'item': {\n"
+                "            'id': 'final', 'type': 'agent_message', 'text': model}}))\n"
+                "        print(json.dumps({'type': 'turn.completed'}))\n"
+                "    sys.exit(int(os.environ.get('BRIDGE_FAKE_CODEX_EXIT', '0')))\n"
+            )
+        os.chmod(self.program, 0o755)
+        os.symlink(self.program, os.path.join(self.bin, "codex"))
+        patcher = mock.patch.dict(
+            os.environ,
+            {
+                "PATH": self.bin + os.pathsep + os.environ.get("PATH", ""),
+                "CODEX_HOME": self.codex_home,
+                "BRIDGE_FAKE_CODEX_LOG": self.log,
+                "BRIDGE_FAKE_CODEX_EVENTS": "",
+                "BRIDGE_FAKE_CODEX_WARNINGS": "",
+                "BRIDGE_FAKE_CODEX_EXIT": "0",
+            },
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _session(self, name, mode="work"):
+        path = os.path.join(self.temp, name)
+        record.record(
+            path, "session-create", "A disposable Codex dispatch.\n",
+            initiator="vibe-coder", peer="codex", project=self.temp, mode=mode,
+        )
+        return path
+
+    def _stream(self, events, exit_code=0):
+        with open(self.events, "w", encoding="utf-8") as stream:
+            stream.write("\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n")
+        os.environ["BRIDGE_FAKE_CODEX_EVENTS"] = self.events
+        os.environ["BRIDGE_FAKE_CODEX_EXIT"] = str(exit_code)
+
+    def _body(self, result):
+        with open(result.response_path, encoding="utf-8") as stream:
+            return stream.read().split("## Body\n\n", 1)[1]
+
+    def test_each_dispatch_uses_codex_current_model_without_an_allowlist_or_override(self):
+        session_dir = self._session("models")
+        for model in ("gpt-6.1-sol", "future-user-selected-model"):
+            with self.subTest(model=model):
+                with open(os.path.join(self.codex_home, "config.toml"), "w") as config:
+                    config.write('model = "' + model + '"\n')
+                result = runner.run_turn(session_dir, "Use the current choice.\n")
+                self.assertEqual(self._body(result), model)
+        with open(self.log, encoding="utf-8") as stream:
+            launches = [json.loads(line) for line in stream]
+        self.assertEqual(len(launches), 2)
+        for launch in launches:
+            self.assertNotIn("--model", launch["argv"])
+            self.assertNotIn("-m", launch["argv"])
+            self.assertNotIn("--ignore-user-config", launch["argv"])
+            self.assertFalse(any(arg.startswith("model=") for arg in launch["argv"]))
+            self.assertEqual(launch["body"], "Use the current choice.\n")
+
+    def test_readiness_identifies_the_resolved_installation_without_claiming_acceptance(self):
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            status = cli.main(["check", "--peer", "codex", "--mode", "work", "--json"])
+        checked = json.loads(output.getvalue())
+        self.assertEqual(status, 0)
+        self.assertTrue(checked["ready"])
+        self.assertEqual(checked["executable"], os.path.realpath(self.program))
+        self.assertEqual(checked["version"], "0.155.1")
+        self.assertIs(checked["selected_model_verified"], False)
+        self.assertFalse(os.path.exists(self.log))
+        for mode in ("work", "review"):
+            with self.subTest(mode=mode):
+                result = codex.check(peer.Deadline(30.0), self.temp, mode=mode)
+                self.assertIn("codex transport is ready", result.message)
+                self.assertIn("model acceptance is unverified", result.message)
+                self.assertIn(os.path.realpath(self.program), result.message)
+                self.assertIn("0.155.1", result.message)
+                self.assertIs(result.selected_model_verified, False)
+
+    def test_both_modes_publish_only_complete_final_text_despite_warning_floods(self):
+        final = "The final answer — café.\u0085Next line.\u2028Line separator.\u2029Paragraph separator.\n" + "Full answer content. " * 200
+        self._stream([
+            {"type": "thread.started", "thread_id": "thread-fixture"},
+            {"type": "turn.started"},
+            {"type": "error", "message": "Reconnecting after a recoverable stream error"},
+            {"type": "future.progress", "text": "future output is not the answer"},
+            {"type": "item.completed", "item": {
+                "id": "commentary", "type": "agent_message", "text": "Intermediate commentary"}},
+            {"type": "item.completed", "item": {
+                "id": "tool", "type": "command_execution", "aggregated_output": "TOOL OUTPUT"}},
+            {"type": "item.completed", "item": {
+                "id": "future", "type": "future_item", "text": "UNKNOWN ITEM OUTPUT"}},
+            {"type": "item.completed", "item": {
+                "id": "final", "type": "agent_message", "text": final}},
+            {"type": "turn.completed", "usage": {"input_tokens": 1}},
+            {"type": "future.summary", "detail": "future terminal addition"},
+        ])
+        os.environ["BRIDGE_FAKE_CODEX_WARNINGS"] = "yes"
+        for mode in ("work", "review"):
+            with self.subTest(mode=mode):
+                result = runner.run_turn(self._session("success-" + mode, mode), "Answer once.\n")
+                self.assertEqual(self._body(result), final)
+        os.environ["BRIDGE_FAKE_CODEX_EXIT"] = "1"
+        for mode in ("work", "review"):
+            with self.subTest(mode=mode, exit_code=1):
+                session_dir = self._session("nonzero-" + mode, mode)
+                with self.assertRaises(BridgeError) as caught:
+                    runner.run_turn(session_dir, "Answer once.\n")
+                self.assertEqual(caught.exception.failure, Failure.PEER_FAILURE)
+                self.assertIn("exit 1", caught.exception.detail)
+                self.assertEqual(os.listdir(session.messages_dir(session_dir)), ["0001-initiator-to-peer.md"])
+
+    def test_actual_rejection_survives_warning_floods_without_replay_or_private_echoes(self):
+        body = "PRIVATE REQUEST café\nSECOND PRIVATE LINE\n"
+        refusal = (
+            "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account. "
+            + "\u0085Next line.\u2028Line separator.\u2029Paragraph separator. "
+            + "Vendor explanation. " * 80 + "ACTIONABLE END"
+        )
+        message = refusal + "\n" + body + "api_key=opaque-private-key\n"
+        self._stream([
+            {"type": "thread.started", "thread_id": "thread-fixture"},
+            {"type": "error", "message": message},
+            {"type": "turn.failed", "error": {"message": message}},
+        ], exit_code=1)
+        os.environ["BRIDGE_FAKE_CODEX_WARNINGS"] = "yes"
+        for mode in ("work", "review"):
+            with self.subTest(mode=mode):
+                events = []
+                session_dir = self._session("rejected-" + mode, mode)
+                with self.assertRaises(BridgeError) as caught:
+                    runner.run_turn(session_dir, body, event_writer=lambda line: events.append(json.loads(line)))
+                detail = caught.exception.detail
+                self.assertEqual(caught.exception.failure, Failure.PEER_FAILURE)
+                decoded_detail, _ = json.JSONDecoder().raw_decode(
+                    detail.split("structured stdout failure: ", 1)[1]
+                )
+                self.assertIn(refusal, decoded_detail)
+                self.assertIn("request body redacted", detail)
+                self.assertIn("credential line redacted", detail)
+                for private in ("PRIVATE REQUEST", "SECOND PRIVATE LINE", "opaque-private-key"):
+                    self.assertNotIn(private, detail)
+                    self.assertNotIn(private, events[-1]["reason"])
+                self.assertEqual(events[-1]["outcome"], "failure")
+                decoded_event_reason, _ = json.JSONDecoder().raw_decode(
+                    events[-1]["reason"].split("structured stdout failure: ", 1)[1]
+                )
+                self.assertIn(refusal, decoded_event_reason)
+                self.assertEqual(os.listdir(session.messages_dir(session_dir)), ["0001-initiator-to-peer.md"])
+        with open(self.log, encoding="utf-8") as stream:
+            self.assertEqual(len(stream.readlines()), 2)
+
+    def test_zero_exit_still_refuses_failed_or_unfinished_turns(self):
+        answer = {"type": "item.completed", "item": {
+            "id": "answer", "type": "agent_message", "text": "Unpublishable candidate"}}
+        completed = {"type": "turn.completed"}
+        streams = {
+            "partial": [{"type": "item.updated", "item": {
+                "id": "answer", "type": "agent_message", "text": "Partial text"}}],
+            "unfinished": [answer],
+            "unfinished-after-commentary": [answer, {"type": "item.started", "item": {
+                "id": "later", "type": "agent_message", "text": "Partial later message"}}, completed],
+            "tool-only": [{"type": "item.completed", "item": {
+                "id": "tool", "type": "command_execution", "aggregated_output": "Tool output"}}, completed],
+            "failed": [answer, {"type": "turn.failed", "error": {"message": "Actual failure"}}],
+            "error-unfinished": [answer, {"type": "error", "message": "Actual failure"}],
+            "duplicate-completion": [answer, completed, completed],
+            "duplicate-start": [{"type": "turn.started"}, {"type": "turn.started"}, answer, completed],
+            "late-start": [answer, {"type": "turn.started"}, completed],
+            "answer-after-completion": [completed, answer],
+            "empty-final": [answer, {"type": "item.completed", "item": {
+                "id": "empty", "type": "agent_message", "text": " "}}, completed],
+        }
+        for name, stream in streams.items():
+            with self.subTest(stream=name):
+                self._stream(stream)
+                session_dir = self._session(name)
+                with self.assertRaises(BridgeError) as caught:
+                    runner.run_turn(session_dir, "Do not invent success.\n")
+                self.assertEqual(caught.exception.failure, Failure.PEER_FAILURE)
+                self.assertEqual(os.listdir(session.messages_dir(session_dir)), ["0001-initiator-to-peer.md"])
+
+    def test_zero_exit_failure_reason_is_complete_and_redacted_after_json_decode(self):
+        body = "PRIVATE REQUEST\n秘密の依頼\n"
+        reason = "Detailed failure. " * 100 + "\u0085Next line.\u2028Line separator.\u2029Paragraph separator. REASON END"
+        message = reason + "\n" + body + "Authorization: Bearer opaque-private-key\n"
+        streams = {
+            "failed": [{"type": "turn.failed", "error": {"message": message}}],
+            "unfinished": [{"type": "error", "message": message}],
+            "no-answer": [{"type": "error", "message": message}, {"type": "turn.completed"}],
+        }
+        for name, events in streams.items():
+            self._stream(events)
+            for mode in ("work", "review"):
+                with self.subTest(stream=name, mode=mode):
+                    with self.assertRaises(BridgeError) as caught:
+                        runner.run_turn(self._session("decoded-error-" + name + "-" + mode, mode), body)
+                    detail = json.loads(caught.exception.detail)
+                    self.assertIn(reason, detail)
+                    self.assertIn("request body redacted", detail)
+                    self.assertIn("credential line redacted", detail)
+                    for private in ("PRIVATE REQUEST", "秘密の依頼", "opaque-private-key"):
+                        self.assertNotIn(private, detail)
+
+    def test_malformed_stream_does_not_publish_a_candidate_answer(self):
+        self._stream([
+            {"type": "item.completed", "item": {
+                "id": "final", "type": "agent_message", "text": "Candidate answer"}},
+            {"type": "turn.completed"},
+        ])
+        with open(self.events, "a", encoding="utf-8") as stream:
+            stream.write("not JSON: PRIVATE REQUEST\n")
+        session_dir = self._session("malformed")
+        with self.assertRaises(BridgeError) as caught:
+            runner.run_turn(session_dir, "PRIVATE REQUEST\n")
+        self.assertEqual(caught.exception.failure, Failure.PEER_FAILURE)
+        self.assertNotIn("PRIVATE REQUEST", caught.exception.detail)
+        self.assertEqual(os.listdir(session.messages_dir(session_dir)), ["0001-initiator-to-peer.md"])
+
+
 class OrdinaryPermissionWorkVectors(unittest.TestCase):
     """The four work vectors, composed against their real connector source."""
 
@@ -1337,6 +1594,7 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
             (
                 "/fake/codex",
                 "exec",
+                "--json",
                 "--skip-git-repo-check",
                 "--cd",
                 self.temp,
@@ -1398,6 +1656,7 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
                     (
                         "/fake/codex",
                         "exec",
+                        "--json",
                         "--skip-git-repo-check",
                         "--cd",
                         self.temp,
@@ -1566,6 +1825,8 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
             review = codex.build_command(peer.Deadline(60.0), self.temp)
         self.assertIn("read-only", review.argv)
         self.assertIn("--ignore-user-config", review.argv)
+        self.assertIn("--json", review.argv)
+        self.assertIs(review.response_parser, codex.parse_response)
 
 
 class WorkModeCheckQualifications(unittest.TestCase):
@@ -1679,7 +1940,7 @@ class WorkModeCheckQualifications(unittest.TestCase):
 
     def test_codex_work_check_qualifies_the_work_switches_only(self):
         work_help = (
-            "Usage: codex exec\n  --skip-git-repo-check\n  --cd <DIR>\n"
+            "Usage: codex exec\n  --skip-git-repo-check\n  --cd <DIR>\n  --json\n"
         )
         probed = []
 

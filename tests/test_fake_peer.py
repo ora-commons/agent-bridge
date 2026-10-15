@@ -2114,7 +2114,8 @@ class SixTargetConnectorBehavior(unittest.TestCase):
                 checked = connector.check(peer.Deadline(30.0), self.temp)
                 self.assertTrue(
                     checked.message.startswith(
-                        "{0} is ready:".format(connector.HARNESS_ID)
+                        "codex transport is ready:" if connector is codex
+                        else "{0} is ready:".format(connector.HARNESS_ID)
                     ),
                     checked.message,
                 )
