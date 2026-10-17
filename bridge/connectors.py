@@ -220,6 +220,24 @@ class Capabilities(NamedTuple):
     image_detail: str
 
 
+class ChoiceSwitches(NamedTuple):
+    """The switches a caller-named model or effort choice travels on.
+
+    A caller may name a model or an effort for one call. The connector
+    passes that name through on its tool's own documented switch and nothing
+    else: it never chooses, completes, or substitutes one itself. Each field
+    holds the switch exactly as this connector's qualified vector passes it,
+    or `None` when the connector's vector documents no switch for that
+    choice - in which case a named choice is refused before request
+    publication with that plain fact, and the tool runs with its own
+    configured model. Readiness reports these same switches as facts,
+    without a model call.
+    """
+
+    model: Optional[str] = None
+    effort: Optional[str] = None
+
+
 #: The most a body may be when it travels on the command line, in encoded
 #: bytes. Fixed by the plan; half the argument space macOS allows a process.
 COMMAND_LINE_BODY_LIMIT = 524288

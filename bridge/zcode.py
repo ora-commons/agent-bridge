@@ -250,6 +250,12 @@ CAPABILITIES = connectors.Capabilities(
     ),
 )
 
+#: The switches a caller-named model or effort choice would travel on: none.
+#: The installed bundle's headless `--prompt` route documents no switch for
+#: naming either, so the runner refuses a named choice before publication
+#: and ZCode runs with its own configured model.
+CHOICE_SWITCHES = connectors.ChoiceSwitches()
+
 #: The switches a work turn relies on, looked for in the help text this build
 #: prints reliably for them and proven together by the no-turn parser probe
 #: below, which passes them to a subcommand that spends no model turn.
@@ -754,6 +760,8 @@ def build_work_command(
     attachments: Sequence[str] = (),
     max_steps: Optional[int] = None,
     required_model: Optional[str] = None,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> connectors.PeerCommand:
     """The ordinary ZCode prompt in `edit` mode, with its real tool set.
 

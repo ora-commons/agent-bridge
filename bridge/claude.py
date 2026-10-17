@@ -141,15 +141,27 @@ CAPABILITIES = connectors.Capabilities(
     ),
 )
 
+#: The switches a caller-named model or effort choice travels on: Claude
+#: Code documents `--model` and `--effort` on its own command line, and both
+#: vectors below pass them through unchanged when the caller names one.
+CHOICE_SWITCHES = connectors.ChoiceSwitches(
+    model="--model",
+    effort="--effort",
+)
+
 #: The switches a work turn relies on, verified against the installed
 #: program's own help before any request is published: the one-shot route and
 #: the switch that isolates the final answer on standard output. The
 #: review-only restriction set is not a work prerequisite - a work vector
 #: passes none of those switches, so their absence cannot make a work call
 #: unusable - and neither is `--add-dir` unless the session declares an
-#: access directory, because a plain work turn never passes it.
+#: access directory, because a plain work turn never passes it. `--model` and
+#: `--effort` join the set only when the caller names a choice the vector
+#: then passes.
 WORK_RESTRICTIONS = ("--print", "--output-format")
 WORK_ACCESS_RESTRICTIONS = ("--add-dir",)
+WORK_MODEL_RESTRICTIONS = ("--model",)
+WORK_EFFORT_RESTRICTIONS = ("--effort",)
 
 WORK_WARNING = (
     "Claude Code work runs on its normal route: user, project, and local "
@@ -374,7 +386,12 @@ def _signed_in(status: CompletedCall) -> str:
 
 
 def _prerequisites(
-    deadline: Deadline, cwd: str, work: bool = False, access_paths: Sequence[str] = ()
+    deadline: Deadline,
+    cwd: str,
+    work: bool = False,
+    access_paths: Sequence[str] = (),
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> Tuple[str, str, str, str, Tuple[str, ...]]:
     """Everything that has to be true before starting Claude Code is worth doing.
 
@@ -386,14 +403,15 @@ def _prerequisites(
     signed in, what does `claude doctor` say about remote managed settings,
     and does the installed version still have every review switch the vector
     relies on. A work turn asks the first five and stops there: it proves the
-    work vector's own switches - `--print`, `--output-format`, and `--add-dir`
-    when the session declares an access directory - and asks neither the
-    doctor question nor the endpoint-policy readings, because both describe
-    the review call's boundary and work mode discards their answers. Any
-    failing question raises, so nothing further happens.
+    work vector's own switches - `--print`, `--output-format`, `--add-dir`
+    when the session declares an access directory, and `--model` or `--effort`
+    when the caller names a choice the vector then passes - and asks neither
+    the doctor question nor the endpoint-policy readings, because both
+    describe the review call's boundary and work mode discards their answers.
+    Any failing question raises, so nothing further happens.
 
-    Returns the four facts a readiness report needs and a turn uses: where the
-    program is, which version answered, how this computer describes itself, and
+    Returns the four facts a readiness report needs and a turn uses: where
+    the program is, which version answered, how this computer describes itself, and
     how the sign-in was made.
     """
     warnings = []  # type: List[str]
@@ -417,10 +435,13 @@ def _prerequisites(
     if not work:
         remote_policy = _remote_managed_settings_fact(program, deadline, cwd)
     help_call = connectors.probe((program, "--help"), cwd, deadline)
+    choice_switches = WORK_MODEL_RESTRICTIONS if model is not None else ()
+    choice_switches += WORK_EFFORT_RESTRICTIONS if effort is not None else ()
     if work:
         switches = WORK_RESTRICTIONS
         if access_paths:
             switches += WORK_ACCESS_RESTRICTIONS
+        switches += choice_switches
         connectors.qualified_restrictions(
             help_call,
             connectors.Qualification(
@@ -435,7 +456,12 @@ def _prerequisites(
         warnings.append(WORK_WARNING)
     else:
         endpoint_policy = _endpoint_managed_settings_fact()
-        connectors.qualified_restrictions(help_call, QUALIFICATION)
+        connectors.qualified_restrictions(
+            help_call,
+            QUALIFICATION._replace(
+                restrictions=QUALIFICATION.restrictions + choice_switches
+            ),
+        )
         warnings.append(
             "Claude Code's --restricted, strict empty MCP, read-only tool, and "
             "planning posture still keeps administrator-managed endpoint and "
@@ -473,7 +499,12 @@ def check(
     )
 
 
-def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
+def build_command(
+    deadline: Deadline,
+    cwd: str,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+) -> connectors.PeerCommand:
     """The fixed argument vector for one turn, prerequisites confirmed first.
 
     The runner calls this inside the turn's readiness bound, which is why the
@@ -486,14 +517,24 @@ def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
     of what its file tools can reach. It comes from the command line only.
     Nothing under a message's `## Body` heading is read anywhere in Agent
     Bridge, so no text a peer or a plan wrote can name a directory here.
+
+    A caller-named model or effort passes through on Claude Code's own
+    documented switches, `--model` and `--effort`, exactly as named. This
+    connector chooses neither itself: unnamed, the call runs on the account's
+    configured default, and a named choice the account rejects at use fails
+    with Claude Code's own error, which the runner surfaces rather than
+    substituting anything.
     """
     program, _version, _described, _account, warnings = _prerequisites(
-        deadline, cwd
+        deadline, cwd, model=model, effort=effort
     )
-    return connectors.PeerCommand(
-        argv=(
-            program,
-            "--print",
+    argv = [program, "--print"]
+    if model is not None:
+        argv.extend(("--model", model))
+    if effort is not None:
+        argv.extend(("--effort", effort))
+    argv.extend(
+        (
             "--restricted",
             "--strict-mcp-config",
             "--tools",
@@ -502,7 +543,10 @@ def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
             "plan",
             "--output-format",
             "text",
-        ),
+        )
+    )
+    return connectors.PeerCommand(
+        argv=tuple(argv),
         cwd=cwd,
         env=connectors.environment(),
         warnings=warnings,
@@ -516,6 +560,8 @@ def build_work_command(
     attachments: Sequence[str] = (),
     max_steps: Optional[int] = None,
     required_model: Optional[str] = None,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> connectors.PeerCommand:
     """The normal `claude --print` route, with no permission flag passed.
 
@@ -529,11 +575,22 @@ def build_work_command(
     directory. An attached image has no switch on this CLI: it reaches the
     model through Claude Code's file-reading tool when the request body names
     its path, so that truth is warned about whenever one is attached.
+
+    A caller-named model or effort passes through on the same documented
+    switches the review vector uses, `--model` and `--effort`, exactly as
+    named; unnamed, the user's own configured choice applies, and no
+    substitution is made for a named choice the account rejects at use.
     """
     program, _version, _described, _account, warnings = _prerequisites(
-        deadline, cwd, work=True, access_paths=access_paths
+        deadline, cwd, work=True, access_paths=access_paths,
+        model=model, effort=effort,
     )
-    argv = [program, "--print", "--output-format", "text"]
+    argv = [program, "--print"]
+    if model is not None:
+        argv.extend(("--model", model))
+    if effort is not None:
+        argv.extend(("--effort", effort))
+    argv.extend(("--output-format", "text"))
     for path in access_paths:
         argv.extend(("--add-dir", path))
     if attachments:

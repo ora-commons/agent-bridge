@@ -519,6 +519,8 @@ def run_turn(
     warning_writer: Optional[WarningWriter] = None,
     max_steps: Optional[int] = None,
     required_model: Optional[str] = None,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
     attachments: Sequence[str] = (),
     note_ref: Optional[str] = None,
     purpose: Optional[str] = None,
@@ -537,6 +539,12 @@ def run_turn(
     `TIMEOUT` exception a caller of the old `timeout_seconds` parameter saw:
     that parameter no longer exists, so an unupdated caller fails loudly
     rather than silently changing meaning.
+
+    `model` and `effort` are the caller's named choices for this one call.
+    Each passes through only the target's own documented switch; a target
+    whose connector documents no switch for a named choice is refused before
+    anything is published, and no model or effort is ever chosen, completed,
+    or substituted here.
     """
     try:
         wait = None if wait_seconds is None else float(wait_seconds)
@@ -558,8 +566,8 @@ def run_turn(
         )
     generator = _turn(
         session_dir, body, wait, build_command, warning_writer, max_steps,
-        required_model, attachments, note_ref, purpose, event_writer,
-        build_work_command,
+        required_model, model, effort, attachments, note_ref, purpose,
+        event_writer, build_work_command,
     )
     try:
         outcome = generator.send(None)
@@ -576,6 +584,8 @@ def _turn(
     warning_writer: Optional[WarningWriter],
     max_steps: Optional[int],
     required_model: Optional[str],
+    model: Optional[str],
+    effort: Optional[str],
     attachments: Sequence[str],
     note_ref: Optional[str],
     purpose: Optional[str],
@@ -591,6 +601,44 @@ def _turn(
             detail="--max-steps and --require-model are available only for a "
             "session whose recorded target is minimax",
         )
+
+    has_named_choice = model is not None or effort is not None
+    if has_named_choice:
+        # A named model or effort passes through only the target's own
+        # documented switch. A target that documents none is refused here,
+        # before connector transport or request publication, and nothing is
+        # chosen or substituted in its place.
+        choices = connectors.resolve(record.peer).CHOICE_SWITCHES
+        for option, named, switch, article, kind in (
+            ("--model", model, choices.model, "a model", "model"),
+            ("--effort", effort, choices.effort, "an effort", "effort"),
+        ):
+            if named is None:
+                continue
+            if switch is None:
+                raise BridgeError(
+                    Failure.USAGE_ERROR,
+                    detail="{0} is refused for {1}: this connector's fixed "
+                    "vector documents no switch for naming {2}, Agent "
+                    "Bridge chooses and substitutes none, and the tool "
+                    "runs with its own configured {3}".format(
+                        option, record.peer, article, kind
+                    ),
+                )
+            if (
+                not named
+                or named != named.strip()
+                or "\n" in named
+                or "\r" in named
+                or len(named) > 256
+            ):
+                raise BridgeError(
+                    Failure.USAGE_ERROR,
+                    detail="{0} must be one nonempty line of at most 256 "
+                    "characters without surrounding whitespace".format(
+                        option
+                    ),
+                )
 
     extended = bool(attachments) or note_ref is not None or purpose is not None
     if extended and record.bridge_format != session_module.FORMAT_3:
@@ -765,15 +813,25 @@ def _turn(
                         attachments=declared_attachments,
                         max_steps=max_steps,
                         required_model=required_model,
+                        model=model,
+                        effort=effort,
                     )
-                elif has_minimax_options:
+                elif has_minimax_options or has_named_choice:
                     builder = build_command or connector.build_command
-                    command = builder(
-                        deadline,
-                        cwd,
-                        max_steps=max_steps,
-                        required_model=required_model,
-                    )
+                    # A review builder receives only the options this call
+                    # actually names: the MiniMax controls, a caller-named
+                    # model or effort, or both together.
+                    review_options = {}  # type: Dict[str, object]
+                    if has_minimax_options:
+                        review_options.update(
+                            max_steps=max_steps,
+                            required_model=required_model,
+                        )
+                    if model is not None:
+                        review_options["model"] = model
+                    if effort is not None:
+                        review_options["effort"] = effort
+                    command = builder(deadline, cwd, **review_options)
                 elif build_command is None:
                     command = connector.build_command(deadline, cwd)
                 else:

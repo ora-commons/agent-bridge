@@ -11,8 +11,11 @@ routes, heartbeat and final-event ordering, separate code and document
 directories, real image bytes reaching a tool, the ordinary-permission work
 vectors of the four connectors that have them, a tool-reported model and
 provider identity surfacing in the finished event and the Format 3 response
-record while unreported identity leaves the fields absent, and a failed or
-stopped call retaining its records without inventing success.
+record while unreported identity leaves the fields absent, a failed or
+stopped call retaining its records without inventing success, and optional
+caller-named model and effort choices passing through each tool's own
+documented switch in both vectors or being refused, before publication,
+with the plain fact that the tool documents none.
 
 The work-mode readiness checks are qualified here against each connector's
 real source: a work check proves the work vector's own switches and never the
@@ -1126,6 +1129,7 @@ class ReadinessAndSupport(unittest.TestCase):
                 image="unknown",
                 image_detail="no evidence either way",
             )
+            CHOICE_SWITCHES = connectors.ChoiceSwitches()
 
             @staticmethod
             def check(deadline, cwd, mode="review"):
@@ -1196,6 +1200,7 @@ class ReadinessAndSupport(unittest.TestCase):
 
         class UnauthenticatedConnector:
             CAPABILITIES = UnknownAuthConnector.CAPABILITIES
+            CHOICE_SWITCHES = UnknownAuthConnector.CHOICE_SWITCHES
 
             @staticmethod
             def check(deadline, cwd, mode="review"):
@@ -1220,6 +1225,7 @@ class ReadinessAndSupport(unittest.TestCase):
 
         class MissingConnector:
             CAPABILITIES = UnknownAuthConnector.CAPABILITIES
+            CHOICE_SWITCHES = UnknownAuthConnector.CHOICE_SWITCHES
 
             @staticmethod
             def check(deadline, cwd, mode="review"):
@@ -1239,6 +1245,7 @@ class ReadinessAndSupport(unittest.TestCase):
                 image="unknown",
                 image_detail="no evidence either way",
             )
+            CHOICE_SWITCHES = connectors.ChoiceSwitches()
 
             @staticmethod
             def check(deadline, cwd, mode="review"):
@@ -1827,6 +1834,370 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
         self.assertIn("--ignore-user-config", review.argv)
         self.assertIn("--json", review.argv)
         self.assertIs(review.response_parser, codex.parse_response)
+
+
+class CallerNamedModelAndEffortChoices(unittest.TestCase):
+    """Optional caller-named model and effort choices, work and review alike.
+
+    A named choice travels only on the selected tool's own documented switch,
+    in either vector, and the switch it needs is qualified like any other the
+    call uses. A tool whose connector documents no switch refuses the named
+    choice before request publication with that plain fact, and Bridge
+    chooses, completes, and substitutes nothing - a choice the tool rejects
+    at use is the tool's own reported failure. Readiness reports the same
+    switches as facts, without a model call.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.mkdtemp(prefix="agent-bridge-named-choices-")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    def _session(self, name, peer_id, mode=None):
+        path = os.path.join(self.temp, name)
+        record.record(
+            path,
+            "session-create",
+            "A named-choice session.\n",
+            initiator="vibe-coder",
+            peer=peer_id,
+            mode=mode,
+        )
+        return path
+
+    @staticmethod
+    def _pairs(argv):
+        return list(zip(argv, argv[1:]))
+
+    def test_each_connector_declares_exactly_the_switches_it_passes(self):
+        declared = (
+            (codex, "-m", "-c model_reasoning_effort=<effort>"),
+            (claude, "--model", "--effort"),
+            (minimax, "--model", None),
+            (zcode, None, None),
+            (hermes, None, None),
+            (qwen, None, None),
+        )
+        for connector, model, effort in declared:
+            with self.subTest(peer=connector.HARNESS_ID):
+                self.assertEqual(
+                    connector.CHOICE_SWITCHES,
+                    connectors.ChoiceSwitches(model=model, effort=effort),
+                )
+
+    def test_codex_and_claude_pass_named_choices_in_both_vectors(self):
+        codex_prerequisite = ("/fake/codex", "0.147.0", "Darwin 26 arm64", ())
+        claude_prerequisite = (
+            "/fake/claude",
+            "2.1.251",
+            "Darwin 26 arm64",
+            "signed in through claude.ai",
+            (claude.WORK_WARNING,),
+        )
+        named = {"model": "chosen-model", "effort": "xhigh"}
+        with mock.patch.object(
+            codex, "_prerequisites", return_value=codex_prerequisite
+        ) as codex_prereq:
+            codex_work = codex.build_work_command(
+                peer.Deadline(60.0), self.temp, **named
+            )
+            codex_review = codex.build_command(
+                peer.Deadline(60.0), self.temp, **named
+            )
+        with mock.patch.object(
+            claude, "_prerequisites", return_value=claude_prerequisite
+        ) as claude_prereq:
+            claude_work = claude.build_work_command(
+                peer.Deadline(60.0), self.temp, **named
+            )
+            claude_review = claude.build_command(
+                peer.Deadline(60.0), self.temp, **named
+            )
+        for command in (codex_work, codex_review):
+            self.assertIn(("-m", "chosen-model"), self._pairs(command.argv))
+            self.assertIn(
+                ("-c", "model_reasoning_effort=xhigh"), self._pairs(command.argv)
+            )
+            self.assertNotIn("--model", command.argv)
+        for command in (claude_work, claude_review):
+            self.assertIn(("--model", "chosen-model"), self._pairs(command.argv))
+            self.assertIn(("--effort", "xhigh"), self._pairs(command.argv))
+        # The named choices reach the prerequisites, which qualify the
+        # switches they travel on, in both modes.
+        for prerequisite in (codex_prereq, claude_prereq):
+            self.assertEqual(len(prerequisite.call_args_list), 2)
+            for call in prerequisite.call_args_list:
+                self.assertEqual(call[1]["model"], "chosen-model")
+                self.assertEqual(call[1]["effort"], "xhigh")
+
+    def test_minimax_passes_a_named_model_and_documents_no_effort(self):
+        prerequisite = (
+            "/fake/mcode",
+            "0.2.7",
+            "Darwin 26 arm64",
+            "authentication not confirmed",
+            (minimax.WORK_WARNING,),
+        )
+        with mock.patch.object(minimax, "_prerequisites", return_value=prerequisite):
+            work = minimax.build_work_command(
+                peer.Deadline(60.0, work_seconds=float("inf")),
+                self.temp,
+                model="minimax/MiniMax-M2.5",
+            )
+            review = minimax.build_command(
+                peer.Deadline(60.0), self.temp, model="minimax/MiniMax-M2.5"
+            )
+        for command in (work, review):
+            self.assertIn(
+                ("--model", "minimax/MiniMax-M2.5"), self._pairs(command.argv)
+            )
+        self.assertIsNone(minimax.CHOICE_SWITCHES.effort)
+
+    def test_a_named_choice_switch_is_qualified_against_the_installed_help(self):
+        def probe_from(help_text):
+            def probe(argv, cwd, deadline, env=None):
+                argv = tuple(argv)
+                if argv[-1] == "--version":
+                    return CompletedCall(0, "codex-cli 0.147.0\n", "")
+                if argv[1:] == ("login", "status"):
+                    return CompletedCall(0, "", "Logged in using ChatGPT")
+                return CompletedCall(0, help_text, "")
+
+            return probe
+
+        help_without = (
+            "Usage: codex exec\n  --skip-git-repo-check\n  --cd <DIR>\n"
+            "  --json\n  -c, --config <key=value>\n"
+        )
+        with mock.patch.object(
+            codex.connectors, "executable", return_value="/fake/codex"
+        ), mock.patch.object(
+            codex.connectors, "qualified_platform", return_value="Darwin 26 arm64"
+        ), mock.patch.object(
+            codex.connectors, "probe", side_effect=probe_from(help_without)
+        ), mock.patch.dict(os.environ, {"CODEX_HOME": self.temp}):
+            with self.assertRaises(BridgeError) as caught:
+                codex.build_work_command(
+                    peer.Deadline(60.0), self.temp, model="chosen-model"
+                )
+        self.assertEqual(caught.exception.failure, Failure.RESTRICTIONS_UNAVAILABLE)
+        self.assertIn("-m", caught.exception.detail)
+
+        help_with = help_without + "  -m, --model <MODEL>\n"
+        with mock.patch.object(
+            codex.connectors, "executable", return_value="/fake/codex"
+        ), mock.patch.object(
+            codex.connectors, "qualified_platform", return_value="Darwin 26 arm64"
+        ), mock.patch.object(
+            codex.connectors, "probe", side_effect=probe_from(help_with)
+        ), mock.patch.dict(os.environ, {"CODEX_HOME": self.temp}):
+            command = codex.build_work_command(
+                peer.Deadline(60.0), self.temp,
+                model="chosen-model", effort="xhigh",
+            )
+        self.assertIn(("-m", "chosen-model"), self._pairs(command.argv))
+        self.assertIn(
+            ("-c", "model_reasoning_effort=xhigh"), self._pairs(command.argv)
+        )
+
+    def test_targets_without_a_documented_switch_refuse_named_choices(self):
+        refusals = (
+            ("zcode", {"model": "chosen-model"}, None),
+            ("zcode", {"effort": "high"}, None),
+            ("zcode", {"model": "chosen-model"}, "work"),
+            ("hermes", {"model": "chosen-model"}, None),
+            ("qwen", {"effort": "high"}, None),
+            ("minimax", {"effort": "high"}, None),
+        )
+        for index, (peer_id, named, mode) in enumerate(refusals):
+            with self.subTest(peer=peer_id, named=sorted(named), mode=mode):
+                session_dir = self._session(
+                    "refuse-{0}".format(index), peer_id, mode=mode
+                )
+                with self.assertRaises(BridgeError) as caught:
+                    runner.run_turn(
+                        session_dir, "Please answer.\n", 30.0, **named
+                    )
+                self.assertEqual(caught.exception.failure, Failure.USAGE_ERROR)
+                self.assertIn(peer_id, caught.exception.detail)
+                self.assertIn("no switch for naming", caught.exception.detail)
+                self.assertIn("chooses and substitutes none", caught.exception.detail)
+                self.assertEqual(
+                    os.listdir(session.messages_dir(session_dir)), []
+                )
+
+    def test_named_choice_values_are_validated_before_publication(self):
+        session_dir = self._session("codex-values", "codex")
+        invalid = (
+            ("--model", ""),
+            ("--model", " spaced "),
+            ("--effort", "two\nlines"),
+        )
+        for option, value in invalid:
+            with self.subTest(option=option, value=value):
+                with self.assertRaises(BridgeError) as caught:
+                    runner.run_turn(
+                        session_dir,
+                        "Please answer.\n",
+                        30.0,
+                        **{option[2:]: value}
+                    )
+                self.assertEqual(caught.exception.failure, Failure.USAGE_ERROR)
+                self.assertIn(option, caught.exception.detail)
+                self.assertEqual(
+                    os.listdir(session.messages_dir(session_dir)), []
+                )
+
+    def test_a_review_turn_hands_the_named_choices_to_the_review_builder(self):
+        observed = []
+
+        class ReviewConnector:
+            CHOICE_SWITCHES = claude.CHOICE_SWITCHES
+
+            @staticmethod
+            def build_command(deadline, cwd, model=None, effort=None):
+                observed.append((model, effort))
+                return PeerCommand(
+                    argv=(sys.executable, FAKE_PEER, "plain"),
+                    cwd=cwd,
+                    env=tuple(os.environ.items()),
+                )
+
+        session_dir = self._session("claude-review", "claude")
+        with mock.patch.object(
+            runner.connectors, "resolve", return_value=ReviewConnector
+        ):
+            result = runner.run_turn(
+                session_dir,
+                "Please answer.\n",
+                30.0,
+                model="chosen-model",
+                effort="high",
+            )
+        self.assertEqual(observed, [("chosen-model", "high")])
+        self.assertTrue(result.response_path.endswith("0002-peer-to-initiator.md"))
+
+    def test_a_rejected_named_model_is_a_failure_never_a_substitution(self):
+        launches = []
+
+        class NamedChoiceConnector:
+            CAPABILITIES = connectors.Capabilities(
+                work="supported",
+                work_detail="fake",
+                image="supported",
+                image_detail="fake",
+            )
+            CHOICE_SWITCHES = codex.CHOICE_SWITCHES
+
+            @staticmethod
+            def build_work_command(
+                deadline, cwd, access_paths=(), attachments=(), **kwargs
+            ):
+                launches.append(kwargs.get("model"))
+                return PeerCommand(
+                    argv=(sys.executable, FAKE_PEER, "fail"),
+                    cwd=cwd,
+                    env=tuple(os.environ.items()),
+                )
+
+        session_dir = self._session("codex-rejected", "codex", mode="work")
+        with mock.patch.object(
+            runner.connectors, "resolve", return_value=NamedChoiceConnector
+        ):
+            with self.assertRaises(BridgeError) as caught:
+                runner.run_turn(
+                    session_dir, "Please answer.\n", 30.0, model="chosen-model"
+                )
+        self.assertEqual(caught.exception.failure, Failure.PEER_FAILURE)
+        self.assertIn("deliberate failure", caught.exception.detail)
+        # One launch, on the named choice: no fallback model, no retry.
+        self.assertEqual(launches, ["chosen-model"])
+        self.assertEqual(
+            os.listdir(session.messages_dir(session_dir)),
+            ["0001-initiator-to-peer.md"],
+        )
+
+    def test_readiness_reports_the_documented_choice_switches(self):
+        class ChoiceConnector:
+            CAPABILITIES = connectors.Capabilities(
+                work="supported",
+                work_detail="fake",
+                image="supported",
+                image_detail="fake",
+            )
+            CHOICE_SWITCHES = codex.CHOICE_SWITCHES
+
+            @staticmethod
+            def check(deadline, cwd, mode="review"):
+                return connectors.CheckResult("confirmed")
+
+        output = io.StringIO()
+        with mock.patch.object(
+            cli.connectors, "resolve", return_value=ChoiceConnector
+        ):
+            with mock.patch("sys.stdout", output):
+                status = cli.main(["check", "--peer", "codex", "--json"])
+        self.assertEqual(status, 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["model_switch"], "-m")
+        self.assertEqual(
+            result["effort_switch"], "-c model_reasoning_effort=<effort>"
+        )
+
+        class NoChoiceConnector(ChoiceConnector):
+            CHOICE_SWITCHES = connectors.ChoiceSwitches()
+
+        output = io.StringIO()
+        with mock.patch.object(
+            cli.connectors, "resolve", return_value=NoChoiceConnector
+        ):
+            with mock.patch("sys.stdout", output):
+                status = cli.main(["check", "--peer", "codex", "--json"])
+        self.assertEqual(status, 0)
+        result = json.loads(output.getvalue())
+        # Absence is the fact that a named choice is refused for this tool.
+        self.assertNotIn("model_switch", result)
+        self.assertNotIn("effort_switch", result)
+
+    def test_the_run_command_line_forwards_named_choices(self):
+        turn = mock.Mock(response_path="/response.md")
+        stdout = io.StringIO()
+        with mock.patch.object(
+            cli.runner, "run_turn", return_value=turn
+        ) as called, mock.patch(
+            "sys.stdout", stdout
+        ), mock.patch("sys.stdin", io.StringIO("Please answer.\n")):
+            self.assertEqual(
+                cli.main(
+                    [
+                        "run",
+                        "--session",
+                        "/session",
+                        "--model",
+                        "chosen-model",
+                        "--effort",
+                        "xhigh",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(stdout.getvalue(), "/response.md\n")
+        called.assert_called_once_with(
+            session_dir="/session",
+            body="Please answer.\n",
+            wait_seconds=None,
+            no_timeout=False,
+            warning_writer=mock.ANY,
+            max_steps=None,
+            required_model=None,
+            model="chosen-model",
+            effort="xhigh",
+            attachments=(),
+            note_ref=None,
+            purpose=None,
+            event_writer=None,
+        )
 
 
 class WorkModeCheckQualifications(unittest.TestCase):

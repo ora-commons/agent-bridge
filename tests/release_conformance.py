@@ -338,6 +338,8 @@ def inspect() -> None:
                 "--no-timeout",
                 "--max-steps",
                 "--require-model",
+                "--model",
+                "--effort",
                 "--events-jsonl",
                 "--attachment",
                 "--note-ref",
