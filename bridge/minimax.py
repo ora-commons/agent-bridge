@@ -68,17 +68,24 @@ CAPABILITIES = connectors.Capabilities(
     ),
 )
 
+#: The switch a caller-named model choice travels on. MiniMax Code
+#: documents `--model <provider/model>` to override the model for one run;
+#: it documents no effort switch, so a named effort is refused.
+CHOICE_SWITCHES = connectors.ChoiceSwitches(model="--model")
+
 #: The switches a work turn relies on, verified against the installed
 #: program's own help before any request is published. The `exec` subcommand
 #: itself is proved by the help probe that carries these switches: a program
 #: without it would not answer `mcode exec --help`. The review-only
 #: `--permission` switch is not a work prerequisite - the work vector passes
 #: no permission policy at all - and the three optional switches are required
-#: only when the work vector actually emits them.
+#: only when the work vector actually emits them, as `--model` is when the
+#: caller names one.
 WORK_RESTRICTIONS = ("--input", "--input-format", "--cwd", "--output-format")
 WORK_TIMEOUT_RESTRICTION = ("--timeout",)
 WORK_ATTACHMENT_RESTRICTIONS = ("--file",)
 WORK_STEPS_RESTRICTIONS = ("--max-steps",)
+WORK_MODEL_RESTRICTIONS = ("--model",)
 
 WORK_WARNING = (
     "MiniMax Code work runs with the program's ordinary headless defaults "
@@ -189,6 +196,7 @@ def _prerequisites(
     work: bool = False,
     attachments: Sequence[str] = (),
     max_steps: Optional[int] = None,
+    model: Optional[str] = None,
 ) -> Tuple[str, str, str, str, Tuple[str, ...]]:
     """Readiness facts and the switches the selected mode's vector relies on.
 
@@ -197,10 +205,11 @@ def _prerequisites(
     what the work vector passes: the standard-input, format, and
     working-directory switches always; `--timeout` when the deadline is one
     the vector can hand to the program; `--file` when an attachment travels;
-    and `--max-steps` when the caller names a bound. The review-only switches
-    are not work prerequisites, because a work call passes none of them.
-    Authentication stays honestly unconfirmed in both modes: MiniMax has no
-    state-free noninteractive authentication check, and none is invented here.
+    `--max-steps` when the caller names a bound; and `--model` when the caller
+    names a model. The review-only switches are not work prerequisites,
+    because a work call passes none of them. Authentication stays honestly
+    unconfirmed in both modes: MiniMax has no state-free noninteractive
+    authentication check, and none is invented here.
     """
     warnings = []  # type: List[str]
     program = connectors.executable(QUALIFICATION.cli_identity)
@@ -219,6 +228,8 @@ def _prerequisites(
             switches += WORK_ATTACHMENT_RESTRICTIONS
         if max_steps is not None:
             switches += WORK_STEPS_RESTRICTIONS
+        if model is not None:
+            switches += WORK_MODEL_RESTRICTIONS
         connectors.qualified_restrictions(
             help_call,
             connectors.Qualification(
@@ -232,7 +243,13 @@ def _prerequisites(
         )
         warnings.append(WORK_WARNING)
     else:
-        connectors.qualified_restrictions(help_call, QUALIFICATION)
+        connectors.qualified_restrictions(
+            help_call,
+            QUALIFICATION._replace(
+                restrictions=QUALIFICATION.restrictions
+                + (WORK_MODEL_RESTRICTIONS if model is not None else ())
+            ),
+        )
         warnings.append(WARNING)
     warnings.append(
         "MiniMax has no state-free noninteractive authentication check: "
@@ -271,10 +288,11 @@ def build_command(
     cwd: str,
     max_steps: Optional[int] = None,
     required_model: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> connectors.PeerCommand:
     validate_run_options(max_steps, required_model)
     program, _version, _described, _account, warnings = _prerequisites(
-        deadline, cwd
+        deadline, cwd, model=model
     )
     # MiniMax starts this timer after this process starts. It is keyed to the
     # work bound, never the readiness bound: an ordinary turn - whose work has
@@ -307,6 +325,9 @@ def build_command(
         )
         + native_timeout
         + (
+            ("--model", model) if model is not None else ()
+        )
+        + (
             "--max-steps",
             str(max_steps if max_steps is not None else 1),
             "--output-format",
@@ -330,6 +351,8 @@ def build_work_command(
     attachments: Sequence[str] = (),
     max_steps: Optional[int] = None,
     required_model: Optional[str] = None,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> connectors.PeerCommand:
     """The ordinary `mcode exec` work invocation, review-only bounds removed.
 
@@ -349,10 +372,17 @@ def build_work_command(
     hands to the model as image content. Declared access directories are
     recorded in the session and stay reachable as ordinary same-user paths;
     mcode has no per-call switch that widens its workspace.
+
+    A caller-named model passes through on MiniMax's own documented
+    `--model` switch, exactly as named, and no substitution is made for one
+    the account rejects at use. MiniMax Code documents no effort switch, so
+    the runner refuses a named effort before this builder is reached; the
+    parameter is accepted and never used.
     """
     validate_run_options(max_steps, required_model)
     program, _version, _described, _account, warnings = _prerequisites(
-        deadline, cwd, work=True, attachments=attachments, max_steps=max_steps
+        deadline, cwd, work=True, attachments=attachments,
+        max_steps=max_steps, model=model,
     )
     native_timeout = (
         (
@@ -378,6 +408,8 @@ def build_work_command(
     argv.extend(native_timeout)
     for attachment in attachments:
         argv.extend(("--file", attachment))
+    if model is not None:
+        argv.extend(("--model", model))
     if max_steps is not None:
         argv.extend(("--max-steps", str(max_steps)))
     argv.extend(

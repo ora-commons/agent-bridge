@@ -153,6 +153,14 @@ CAPABILITIES = connectors.Capabilities(
     ),
 )
 
+#: The switches a caller-named model or effort choice travels on: Codex
+#: documents `-m/--model` and the `model_reasoning_effort` configuration key,
+#: which this vector passes as one `-c` override beside the others.
+CHOICE_SWITCHES = connectors.ChoiceSwitches(
+    model="-m",
+    effort="-c model_reasoning_effort=<effort>",
+)
+
 #: The switches a work turn relies on, verified against the installed
 #: program's own help before any request is published. The `exec` subcommand
 #: itself is proved by the help probe that carries these switches: a program
@@ -160,10 +168,13 @@ CAPABILITIES = connectors.Capabilities(
 #: restriction set is not a work prerequisite - the work vector passes none of
 #: those switches - and neither are `--add-dir` or `--image` unless the
 #: session declares an access directory or sends an attachment, because a
-#: plain work turn passes neither.
+#: plain work turn passes neither. `-m` and `-c` join the set only when the
+#: caller names a model or an effort for the call.
 WORK_RESTRICTIONS = ("--skip-git-repo-check", "--cd", "--json")
 WORK_ACCESS_RESTRICTIONS = ("--add-dir",)
 WORK_ATTACHMENT_RESTRICTIONS = ("--image",)
+WORK_MODEL_RESTRICTIONS = ("-m",)
+WORK_EFFORT_RESTRICTIONS = ("-c",)
 
 #: The sandbox postures `codex exec` accepts, and the posture its own
 #: documented default runs in when nothing configures another. The default is
@@ -405,6 +416,8 @@ def _prerequisites(
     work: bool = False,
     access_paths: Sequence[str] = (),
     attachments: Sequence[str] = (),
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> Tuple[str, str, str, Tuple[str, ...]]:
     """Everything that has to be true before starting Codex is worth doing.
 
@@ -414,9 +427,10 @@ def _prerequisites(
     installed version still have every switch the turn relies on - the review
     set for a review turn, and for a work turn the work vector's own switches:
     the working-root and no-repository switches always, `--add-dir` when an
-    access directory is declared, and `--image` when an attachment travels.
-    The review-only switches are not a work prerequisite, because a work
-    vector passes none of them. Any failing question raises, so nothing
+    access directory is declared, `--image` when an attachment travels, and
+    `-m` or `-c` when the caller names a model or an effort the vector then
+    passes. The review-only switches are not a work prerequisite, because a
+    work vector passes none of them. Any failing question raises, so nothing
     further happens.
 
     Returns the three facts a readiness report needs and a turn uses: where
@@ -441,12 +455,15 @@ def _prerequisites(
         )
 
     help_call = connectors.probe((program, "exec", "--help"), cwd, deadline)
+    choice_switches = WORK_MODEL_RESTRICTIONS if model is not None else ()
+    choice_switches += WORK_EFFORT_RESTRICTIONS if effort is not None else ()
     if work:
         switches = WORK_RESTRICTIONS
         if access_paths:
             switches += WORK_ACCESS_RESTRICTIONS
         if attachments:
             switches += WORK_ATTACHMENT_RESTRICTIONS
+        switches += choice_switches
         connectors.qualified_restrictions(
             help_call,
             connectors.Qualification(
@@ -461,7 +478,12 @@ def _prerequisites(
         posture, origin = _apparent_sandbox()
         warnings.append(_work_warning(posture, origin))
     else:
-        connectors.qualified_restrictions(help_call, QUALIFICATION)
+        connectors.qualified_restrictions(
+            help_call,
+            QUALIFICATION._replace(
+                restrictions=QUALIFICATION.restrictions + choice_switches
+            ),
+        )
         warnings.append(WARNING)
     return program, version, described, tuple(warnings)
 
@@ -490,7 +512,12 @@ def check(
     )
 
 
-def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
+def build_command(
+    deadline: Deadline,
+    cwd: str,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+) -> connectors.PeerCommand:
     """The fixed argument vector for one turn, prerequisites confirmed first.
 
     The runner calls this inside the turn's readiness bound, which is why the
@@ -502,13 +529,24 @@ def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
     from the command line only. Nothing under a message's `## Body` heading is
     read anywhere in Agent Bridge, so no text a peer or a plan wrote can name a
     directory here.
+
+    A caller-named model or effort passes through on Codex's own documented
+    switches, `-m` and one `-c model_reasoning_effort=` override, exactly as
+    named. This connector chooses no model or effort itself: unnamed, the call
+    runs on Codex's own configured or built-in default, and a named model the
+    account rejects at use fails inside Codex with Codex's own error, which the
+    runner surfaces rather than substituting anything.
     """
-    program, _version, _described, warnings = _prerequisites(deadline, cwd)
-    return connectors.PeerCommand(
-        argv=(
-            program,
-            "exec",
-            "--json",
+    program, _version, _described, warnings = _prerequisites(
+        deadline, cwd, model=model, effort=effort
+    )
+    argv = [program, "exec", "--json"]
+    if model is not None:
+        argv.extend(("-m", model))
+    if effort is not None:
+        argv.extend(("-c", "model_reasoning_effort=" + effort))
+    argv.extend(
+        (
             "--ignore-user-config",
             "-c",
             "web_search=disabled",
@@ -532,7 +570,10 @@ def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
             "--cd",
             cwd,
             "-",
-        ),
+        )
+    )
+    return connectors.PeerCommand(
+        argv=tuple(argv),
         cwd=cwd,
         env=connectors.environment(),
         warnings=warnings,
@@ -548,6 +589,8 @@ def build_work_command(
     attachments: Sequence[str] = (),
     max_steps: Optional[int] = None,
     required_model: Optional[str] = None,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> connectors.PeerCommand:
     """The ordinary configured `codex exec`, under the user's own sandbox.
 
@@ -577,19 +620,33 @@ def build_work_command(
     needs and has no interactive approver to escalate to - fails inside
     codex with codex's own error, which the runner surfaces with its reason
     and next action.
+
+    A caller-named model or effort passes through on the same documented
+    switches the review vector uses, `-m` and one `-c
+    model_reasoning_effort=` override, exactly as named; unnamed, the user's
+    ordinary configured model and effort apply, and no substitution of any
+    kind is made for a named choice the account rejects at use.
     """
     program, _version, _described, warnings = _prerequisites(
         deadline, cwd, work=True, access_paths=access_paths,
-        attachments=attachments,
+        attachments=attachments, model=model, effort=effort,
     )
     argv = [
         program,
         "exec",
         "--json",
-        "--skip-git-repo-check",
-        "--cd",
-        cwd,
     ]
+    if model is not None:
+        argv.extend(("-m", model))
+    if effort is not None:
+        argv.extend(("-c", "model_reasoning_effort=" + effort))
+    argv.extend(
+        (
+            "--skip-git-repo-check",
+            "--cd",
+            cwd,
+        )
+    )
     for path in access_paths:
         argv.extend(("--add-dir", path))
     for attachment in attachments:

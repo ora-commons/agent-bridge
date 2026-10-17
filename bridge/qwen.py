@@ -132,6 +132,14 @@ CAPABILITIES = connectors.Capabilities(
     ),
 )
 
+#: The switches a caller-named model or effort choice would travel on: none.
+#: This connector's fixed vector adds no model selection or credential
+#: handling of any kind - Qwen keeps the user's existing authentication and
+#: provider setup, and the vector disables the `/model` and `/effort`
+#: pre-model command families - so the runner refuses a named choice before
+#: publication and Qwen answers on its own configured model.
+CHOICE_SWITCHES = connectors.ChoiceSwitches()
+
 
 def _environment(cwd: str) -> Tuple[Tuple[str, str], ...]:
     """Keep authentication; pin compatible controls and clear inherited routes."""

@@ -68,6 +68,18 @@ def build_parser() -> argparse.ArgumentParser:
                              "the run (the default; kept for compatibility)")
     run.add_argument("--max-steps", type=int)
     run.add_argument("--require-model")
+    run.add_argument(
+        "--model",
+        help="name the model for this one call; it passes through only the "
+             "target's own documented switch, and a target with none refuses "
+             "it before publication",
+    )
+    run.add_argument(
+        "--effort",
+        help="name the reasoning effort for this one call; it passes through "
+             "only the target's own documented switch, and a target with "
+             "none refuses it before publication",
+    )
     run.add_argument("--events-jsonl", action="store_true")
     run.add_argument("--attachment", action="append")
     run.add_argument("--note-ref")
@@ -158,10 +170,12 @@ def _check_json(args: argparse.Namespace) -> int:
     The object carries the selected peer and mode, usability, the identity and
     version of this loaded Bridge copy, whether the local command is present,
     the executable/version/platform facts, tri-state authentication, the
-    connector's implemented review/work/image actions, the compatibility of
-    the loaded combination, and warnings. The implemented actions are source
-    facts of the connector, so a failed login or a missing command does not
-    erase them. `compatibility` is `supported` when the installed version and
+    connector's implemented review/work/image actions, the switches a caller-
+    named model or effort choice would travel on, the compatibility of the
+    loaded combination, and warnings. The implemented actions and choice
+    switches are source facts of the connector, so a failed login or a
+    missing command does not erase them. `compatibility` is `supported` when
+    the installed version and
     platform are inside the connector's exercised release evidence, and
     `unknown` when they are outside it or nothing established either way;
     `unsupported` means the requested action is an implemented-but-refused
@@ -212,10 +226,20 @@ def _check_json(args: argparse.Namespace) -> int:
             # program to run; only MISSING_CLI says it was not.
             result["command_present"] = error.failure != Failure.MISSING_CLI
     if known_connector:
-        capability = connectors.resolve(args.peer).CAPABILITIES
+        connector = connectors.resolve(args.peer)
+        capability = connector.CAPABILITIES
         result["review"] = "supported"
         result["work"] = capability.work
         result["image"] = capability.image
+        # The choices this tool documents for a caller-named model or effort,
+        # gathered from the connector's declaration without a model call. A
+        # field appears only when the tool documents that choice; its absence
+        # is the fact that a named choice is refused.
+        choices = connector.CHOICE_SWITCHES
+        if choices.model is not None:
+            result["model_switch"] = choices.model
+        if choices.effort is not None:
+            result["effort_switch"] = choices.effort
         if checked is not None:
             result["warnings"] = list(checked.warnings)
         if capability.work == "unsupported":
@@ -252,6 +276,8 @@ def _run(args: argparse.Namespace) -> Tuple[int, Optional[str]]:
         ),
         max_steps=args.max_steps,
         required_model=args.require_model,
+        model=args.model,
+        effort=args.effort,
         attachments=tuple(args.attachment or ()),
         note_ref=args.note_ref,
         purpose=args.purpose,

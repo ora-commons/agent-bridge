@@ -191,6 +191,15 @@ CAPABILITIES = connectors.Capabilities(
     ),
 )
 
+#: The switches a caller-named model or effort choice would travel on: none.
+#: This connector's courier route is qualified without any model or provider
+#: selection - its one-shot vector passes neither, model selection there is
+#: entangled with the provider choice this connector never makes, and it
+#: declines to run through anything but the subscription - so the runner
+#: refuses a named choice before publication and Hermes answers on its own
+#: configured model.
+CHOICE_SWITCHES = connectors.ChoiceSwitches()
+
 
 def _environment() -> Tuple[Tuple[str, str], ...]:
     """This process's environment with the one redirecting name taken out."""
