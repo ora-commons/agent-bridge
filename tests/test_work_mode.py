@@ -380,6 +380,29 @@ class WorkTurnBehavior(unittest.TestCase):
         self.assertIn("Note-Ref: real-ref\n", header)
         self.assertEqual(body_text, shaped)
 
+    def test_zcode_permission_handoff_reaches_only_a_work_builder(self):
+        for target, mode in (("zcode", "work"), ("zcode", "review"), ("codex", "work")):
+            with self.subTest(target=target, mode=mode):
+                directory = os.path.join(self.temp, target + "-" + mode)
+                record.record(directory, "session-create", "Permission test.\n",
+                              initiator="vibe-coder", peer=target, mode=mode)
+                builder = mock.Mock(side_effect=self._builder("plain"))
+                if (target, mode) == ("zcode", "work"):
+                    runner.run_turn(directory, "Do approved work.\n",
+                                    work_permission="full-access", build_work_command=builder)
+                    self.assertEqual(builder.call_args.kwargs["work_permission"], "full-access")
+                    # The choice belongs to one turn, not to the session.
+                    builder.reset_mock()
+                    runner.run_turn(directory, "Ordinary work.\n", build_work_command=builder)
+                    self.assertNotIn("work_permission", builder.call_args.kwargs)
+                else:
+                    with self.assertRaises(BridgeError) as caught:
+                        runner.run_turn(directory, "Do work.\n", work_permission="full-access",
+                                        build_work_command=builder)
+                    self.assertEqual(caught.exception.failure, Failure.USAGE_ERROR)
+                    builder.assert_not_called()
+                    self.assertEqual(os.listdir(os.path.join(directory, "messages")), [])
+
     def test_extended_run_options_stay_off_format_2_sessions(self):
         legacy = os.path.join(self.temp, "legacy")
         record.record(
@@ -1767,7 +1790,9 @@ class OrdinaryPermissionWorkVectors(unittest.TestCase):
             "minimum local configuration is present",
             (zcode.WORK_WARNING,),
         )
-        with mock.patch.object(zcode, "_program", return_value=("/n", "/z")):
+        with mock.patch.object(zcode, "_program", return_value=("/n", "/z")), mock.patch.object(
+            zcode, "_environment", return_value=()
+        ):
             with mock.patch.object(
                 zcode, "_prerequisites", return_value=prerequisite
             ):
@@ -2178,6 +2203,8 @@ class CallerNamedModelAndEffortChoices(unittest.TestCase):
                         "chosen-model",
                         "--effort",
                         "xhigh",
+                        "--work-permission",
+                        "full-access",
                     ]
                 ),
                 0,
@@ -2193,6 +2220,7 @@ class CallerNamedModelAndEffortChoices(unittest.TestCase):
             required_model=None,
             model="chosen-model",
             effort="xhigh",
+            work_permission="full-access",
             attachments=(),
             note_ref=None,
             purpose=None,
@@ -2511,6 +2539,66 @@ class WorkModeCheckQualifications(unittest.TestCase):
                 )
             self.assertNotIn("--timeout", astronomical.argv)
 
+    def test_zcode_full_access_permission_is_qualified_and_reported_without_execution(self):
+        probed = []
+
+        def fake(argv):
+            if argv[2] in ("--version", "version"):
+                return CompletedCall(0, "zcode 0.16.5\n", "")
+            if argv[2] == "plugins":
+                return CompletedCall(0, "[]", "")
+            return CompletedCall(0, "--prompt <text>\n--mode <mode>\n--cwd <path>\n", "")
+
+        with mock.patch.object(zcode, "_environment", return_value=()), \
+                mock.patch.object(zcode, "_program", return_value=("/fake/node", "/fake/zcode.cjs")), \
+                mock.patch.object(zcode.connectors, "qualified_platform", return_value="Darwin 26 arm64"), \
+                mock.patch.object(zcode, "_sign_in_facts", return_value="sign-in observed"), \
+                mock.patch.object(zcode.connectors, "probe", side_effect=self._probed(fake, probed)):
+            stdout = io.StringIO()
+            with mock.patch("sys.stdout", stdout):
+                status = cli.main(["check", "--peer", "zcode", "--mode", "work",
+                                   "--work-permission", "full-access", "--json"])
+            command = zcode.build_work_command(peer.Deadline(30), self.temp,
+                                               work_permission="full-access")
+        self.assertEqual(status, 0)
+        facts = json.loads(stdout.getvalue())
+        self.assertEqual(facts["effective_permission"], "full-access")
+        self.assertTrue(facts["headless_shell"])
+        self.assertFalse(facts["shell_execution_verified"])
+        self.assertFalse(facts["selected_model_verified"])
+        self.assertEqual(facts["authentication"], "unknown")
+        self.assertIn("under your account", facts["warnings"][0].replace("operating-system ", ""))
+        self.assertEqual(command.argv, ("/fake/node", "/fake/zcode.cjs", "--mode", "yolo",
+                                       "--cwd", self.temp, "--output-format", "text"))
+        self.assertIn(zcode.FULL_ACCESS_WARNING, command.warnings)
+        for call in (call for call in probed if call[2] == "version"):
+            self.assertEqual(call[3:5], ("--mode", "yolo"))
+            self.assertNotIn("--disallowed-tools", call)
+
+        def rejects_full_access(argv):
+            if argv[2] == "version" and "yolo" in argv:
+                return CompletedCall(1, "", "unsupported mode yolo")
+            return fake(argv)
+
+        with mock.patch.object(zcode, "_environment", return_value=()), \
+                mock.patch.object(zcode, "_program", return_value=("/fake/node", "/fake/zcode.cjs")), \
+                mock.patch.object(zcode.connectors, "qualified_platform", return_value="Darwin 26 arm64"), \
+                mock.patch.object(zcode, "_sign_in_facts", return_value="sign-in observed"), \
+                mock.patch.object(zcode.connectors, "probe", side_effect=self._probed(rejects_full_access, [])):
+            ordinary = zcode.check(peer.Deadline(30), self.temp, mode="work")
+            self.assertEqual(ordinary.effective_permission, "edit")
+            self.assertFalse(ordinary.headless_shell)
+            with self.assertRaises(BridgeError) as caught:
+                zcode.check(peer.Deadline(30), self.temp, mode="work", work_permission="full-access")
+            self.assertEqual(caught.exception.failure, Failure.RESTRICTIONS_UNAVAILABLE)
+
+        for target, mode in (("codex", "work"), ("zcode", "review")):
+            with mock.patch.object(cli.connectors, "resolve") as resolve, \
+                    mock.patch("sys.stderr", io.StringIO()):
+                self.assertEqual(cli.main(["check", "--peer", target, "--mode", mode,
+                                           "--work-permission", "full-access"]), 1)
+                resolve.assert_not_called()
+
     def test_zcode_work_check_drops_the_review_deny_list_requirement(self):
         help_text = (
             "  -p, --prompt <text>\n  --mode <mode>\n  --cwd <path>\n"
@@ -2527,7 +2615,7 @@ class WorkModeCheckQualifications(unittest.TestCase):
                 return CompletedCall(0, "zcode 0.16.5\n", "")
             return CompletedCall(0, help_text, "")
 
-        with mock.patch.object(
+        with mock.patch.object(zcode, "_environment", return_value=()), mock.patch.object(
             zcode, "_program", return_value=("/fake/node", "/fake/zcode.cjs")
         ), mock.patch.object(
             zcode.connectors, "qualified_platform",
@@ -2579,7 +2667,7 @@ class WorkModeCheckQualifications(unittest.TestCase):
                 return CompletedCall(0, "zcode 0.16.5\n", "")
             return CompletedCall(0, no_deny_list, "")
 
-        with mock.patch.object(
+        with mock.patch.object(zcode, "_environment", return_value=()), mock.patch.object(
             zcode, "_program", return_value=("/fake/node", "/fake/zcode.cjs")
         ), mock.patch.object(
             zcode.connectors, "qualified_platform",
@@ -2595,7 +2683,7 @@ class WorkModeCheckQualifications(unittest.TestCase):
         self.assertEqual(caught.exception.failure, Failure.RESTRICTIONS_UNAVAILABLE)
 
         review_probes = []
-        with mock.patch.object(
+        with mock.patch.object(zcode, "_environment", return_value=()), mock.patch.object(
             zcode, "_program", return_value=("/fake/node", "/fake/zcode.cjs")
         ), mock.patch.object(
             zcode.connectors, "qualified_platform",
@@ -2630,7 +2718,7 @@ class WorkModeCheckQualifications(unittest.TestCase):
                 return CompletedCall(0, "zcode 0.16.5\n", "")
             return CompletedCall(0, no_attach, "")
 
-        with mock.patch.object(
+        with mock.patch.object(zcode, "_environment", return_value=()), mock.patch.object(
             zcode, "_program", return_value=("/fake/node", "/fake/zcode.cjs")
         ), mock.patch.object(
             zcode.connectors, "qualified_platform",

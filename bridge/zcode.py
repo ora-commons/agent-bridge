@@ -3,43 +3,25 @@
 ZCode is Z.AI's coding agent. Its command-line program is not installed on
 `PATH`: it is a JavaScript bundle shipped inside the desktop application, run by
 a Node runtime, so a call is `node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs ...`,
-or, on a desktop build that ships a file the bundle needs somewhere the bundle
-does not look, `node` handed a link to that same bundle in a small launcher
-folder, described next.
-This module is the whole of what Agent Bridge knows about it: where those two
-pieces are, which switches hold the boundary, how the message gets in, how the
-answer comes back, and how to tell - without spending a model turn - whether
-starting it would work at all.
+and started directly. This module owns its switches, prompt transport, output,
+and no-model readiness checks.
 
-**Why the bundle is sometimes started through a launcher folder.** Before it
-answers a prompt, the bundle loads a built-in provider file, and it works out
-where to look from the path it was started under - the path Node was handed,
-not the place its code really lives. It tries `provider/zcode-builtin.json`
-in the folder of that path, then `config/provider/zcode-builtin.json` in the
-folder five levels above it. ZCode 3.14.1, whose command-line program reports
-0.16.9, ships the file in `Contents/Resources/config/provider/`, which neither
-lookup reaches from `Contents/Resources/glm/`, so every turn stops at once
-with an error naming both places while the commands that spend no turn still
-work. `ZCODE_BUILTIN_PROVIDER_BUNDLED_CONFIG_FILE` and
-`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` were tried and are not consulted by that
-lookup, so no variable can point it elsewhere. So when the file is missing
-from where the bundle looks but present where the application ships it, this
-connector starts the bundle through an owner-only launcher folder in the
-user's cache directory that holds exactly two symbolic links: `zcode.cjs` to
-the real bundle, and `provider/zcode-builtin.json` to the application's own
-file. Node follows the first link to load the code from the real bundle, but
-the path the bundle sees is the link's, so its first lookup lands on the
-second link. Nothing is copied and nothing of the vendor's is changed. The
-folder and its provider subfolder are refused if either is itself a link or
-belongs to another account, and the two links are checked on every call, a
-missing or wrong one being replaced in one atomic step. Should the vendor
-restore the layout the bundle expects, the bundle is started directly again;
-should the application's own file be absent too, it is started directly and
-left to report its own error.
+**Provider paths belong to this process only.** The installed bundle resolves
+its entrypoint to the real file before looking beside it for its built-in
+provider configuration. A launcher symlink therefore cannot repair an app
+layout whose provider file lives elsewhere. ZCode natively accepts the pair
+`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` and
+`ZCODE_PERSONAL_PROVIDER_CONFIG_FILE`. Bridge preserves caller-supplied paths
+and fills absent values with the app's own built-in file and ZCode's native
+personal path, `<ZCODE_DATA_BASE_DIR or home>/.zcode/v2/provider_config.json`.
+The same environment goes to readiness probes and the actual turn, without
+changing the parent environment or writing a launcher or configuration file.
+Readiness refuses a missing or unreadable built-in provider file by metadata
+only. It never opens either provider file or selects a model or provider.
 
 There are three operations here and nothing else. `check` answers whether ZCode
 could be used right now. `build_command` composes the one fixed argument vector
-a review turn runs. `build_work_command` composes the edit-mode prompt a work
+a review turn runs. `build_work_command` composes the per-call permission prompt a work
 turn runs. All of them do the same inexpensive prerequisites first, because a
 turn that skipped them would find out about a missing runtime, a renamed switch
 or a newly enabled plugin in the middle of real work, with the peer already
@@ -164,8 +146,7 @@ login's order and spacing, and whether an API-key environment variable is set -
 and says outright that sign-in itself is not confirmed.
 
 **What readiness costs.** Nothing. Where the runtime is, whether the bundle is
-at its documented place, whether it can find its provider file (and, only when
-it cannot, the launcher's two links, checked and if need be remade),
+at its documented place, whether its built-in provider path is a readable file,
 `--version`, `--help`, `version` with the switches the turn relies on,
 `plugins list --json`, and the modification times of two files. No model turn
 among them.
@@ -177,8 +158,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
-import uuid
 from typing import List, Optional, Sequence, Tuple
 
 from . import connectors
@@ -196,22 +175,15 @@ RUNTIME = "node"
 #: `zcode` on PATH to find; this is the documented location of the bundle.
 SCRIPT = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"
 
-#: Where the bundle first looks for its built-in provider file, relative to the
-#: folder of the path it was started under. Found there, the bundle is started
-#: directly, as it always was.
-PROVIDER_FILE = os.path.join("provider", "zcode-builtin.json")
-
-#: Where the desktop application itself ships that provider file. ZCode 3.14.1
-#: puts it here, where neither of the bundle's own lookups reaches from `SCRIPT`.
+#: The desktop app's built-in provider file, passed through its native
+#: per-process path support rather than inferred from the bundle's location.
 BUILTIN_PROVIDER = (
     "/Applications/ZCode.app/Contents/Resources/config/provider/"
     "zcode-builtin.json"
 )
-
-#: The per-user folder the bundle is started from when its provider file is
-#: only at `BUILTIN_PROVIDER`: two symbolic links and nothing else. It is under
-#: the macOS cache directory because the application exists only on macOS.
-LAUNCHER = os.path.join("~", "Library", "Caches", "agent-bridge", "zcode-launcher")
+BUILTIN_PROVIDER_VARIABLE = "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"
+PERSONAL_PROVIDER_VARIABLE = "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE"
+PERSONAL_PROVIDER_FILE = os.path.join(".zcode", "v2", "provider_config.json")
 
 #: What this connector has actually been tested against, declared in source and
 #: never inferred from the machine it is running on. `restrictions` names the
@@ -232,16 +204,16 @@ QUALIFICATION = connectors.Qualification(
 )
 
 #: What this connector offers beyond its restricted review call. Work is
-#: ZCode's own `edit` permission mode - never `yolo`, which is the mode a bare
-#: `--prompt` defaults to and which auto-approves everything. Images have a
+#: ZCode's own `edit` permission mode by default, or explicitly requested
+#: Full access (`yolo`) for one work call. Images have a
 #: native attachment switch that feeds the model real inline image content.
 CAPABILITIES = connectors.Capabilities(
     work="supported",
     work_detail=(
         "work uses zcode --mode edit, ZCode's own permission mode in which "
         "workspace file edits are allowed and every other approval-needing "
-        "tool is denied by the deny broker a headless prompt uses; yolo is "
-        "never selected"
+        "tool is denied by the deny broker a headless prompt uses; an explicit "
+        "--work-permission full-access selects native --mode yolo for that call"
     ),
     image="supported",
     image_detail=(
@@ -274,7 +246,14 @@ WORK_WARNING = (
     "applied, so the ordinary tool set is available under those rules, and "
     "enabled plugins and directly configured MCP servers keep whatever routes "
     "they already had. The prompt default for --prompt is yolo; this vector "
-    "overrides it with edit on every call."
+    "overrides it with edit unless this call explicitly requests Full access."
+)
+
+FULL_ACCESS_WARNING = (
+    "ZCode Full access is selected for this work call only (--mode yolo): "
+    "tools, including shell commands for Git and tests, run without an approval "
+    "connection under your operating-system account. This does not change "
+    "global settings or authorize work beyond the user's request and project instructions."
 )
 
 #: The prefix the body is bound to as the final argument. One argument, so no
@@ -349,7 +328,7 @@ def _program() -> Tuple[str, str]:
     The bundle is looked for at its one documented place; nothing is searched
     for, and nothing is installed or put on PATH. Either missing is
     `MISSING_CLI` naming which. The second value is the path handed to Node:
-    `SCRIPT` itself, or the launcher's link to it, as `_entry` decides.
+    `SCRIPT` itself; provider paths travel separately in the child environment.
     """
     runtime = connectors.executable(RUNTIME)
     if not os.path.isfile(SCRIPT):
@@ -358,93 +337,37 @@ def _program() -> Tuple[str, str]:
             detail="the ZCode desktop application's command-line bundle is "
             "not at {0}".format(SCRIPT),
         )
-    return runtime, _entry()
+    return runtime, SCRIPT
 
 
-def _entry() -> str:
-    """The bundle itself, or its link in the launcher folder, made safe first.
+def _environment(cwd: str) -> Tuple[Tuple[str, str], ...]:
+    """Keep ZCode's provider identity while repairing its per-process paths.
 
-    The bundle is started directly when its provider file is where its own
-    first lookup lands - the layout a vendor fix would restore - and also when
-    the application's own copy at `BUILTIN_PROVIDER` is absent, so that what a
-    person then sees is the bundle's own error rather than one of ours. Only in
-    between, with the file shipped where the application keeps it and nowhere
-    the bundle looks, is the launcher made or repaired and its link returned.
-    A launcher that cannot be made or trusted is `MISSING_CLI` naming the folder
-    and the reason, raised here and so before any request is published.
+    ZCode requires both path variables together. A supplied path wins; the
+    absent personal path uses exactly ZCode's native data-base/home location.
+    The built-in file must be readable before a no-model check can claim
+    usable launch mechanics. Its contents and the personal store are never
+    opened here, and no parent environment or persistent setting is changed.
     """
-    if os.path.isfile(os.path.join(os.path.dirname(SCRIPT), PROVIDER_FILE)):
-        return SCRIPT
-    if not os.path.isfile(BUILTIN_PROVIDER):
-        return SCRIPT
-    launcher = os.path.expanduser(LAUNCHER)
-    entry = os.path.join(launcher, os.path.basename(SCRIPT))
-    try:
-        _private_folder(launcher)
-        _private_folder(os.path.join(launcher, os.path.dirname(PROVIDER_FILE)))
-        _link(entry, SCRIPT)
-        _link(os.path.join(launcher, PROVIDER_FILE), BUILTIN_PROVIDER)
-    except OSError as error:
+    env = dict(connectors.environment())
+    if not env.get(BUILTIN_PROVIDER_VARIABLE, "").strip():
+        env[BUILTIN_PROVIDER_VARIABLE] = BUILTIN_PROVIDER
+    if not env.get(PERSONAL_PROVIDER_VARIABLE, "").strip():
+        base = env.get(DATA_BASE_DIR_VARIABLE)
+        base = base.strip() if base is not None else os.path.expanduser("~")
+        env[PERSONAL_PROVIDER_VARIABLE] = os.path.join(base, PERSONAL_PROVIDER_FILE)
+    builtin = env[BUILTIN_PROVIDER_VARIABLE].strip()
+    checked_path = os.path.join(cwd, builtin)
+    if not os.path.isfile(checked_path) or not os.access(checked_path, os.R_OK):
         raise BridgeError(
             Failure.MISSING_CLI,
-            detail="the ZCode bundle does not look for its built-in provider "
-            "file at {0}, where the application ships it, and the launcher "
-            "folder at {1} that lets it find the file could not be prepared: "
-            "{2}".format(BUILTIN_PROVIDER, launcher, error),
+            detail="ZCode's built-in provider configuration is not a readable "
+            "file at {0}, selected by {1}; restore that file or correct the "
+            "supplied path before checking again".format(
+                builtin, BUILTIN_PROVIDER_VARIABLE,
+            ),
         )
-    return entry
-
-
-def _private_folder(path: str) -> None:
-    """Make `path` an owner-only folder of this account's, or refuse it.
-
-    Created, with any missing parents, if it is absent. It is refused, not
-    repaired, if it is itself a symbolic link or anything but a folder, or
-    belongs to another account, because either would let something other than
-    this account decide what Node runs. One of this account's own whose
-    permissions have been opened up is closed to owner-only again.
-    """
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    status = os.lstat(path)
-    if not stat.S_ISDIR(status.st_mode):
-        raise OSError(
-            "{0} is a symbolic link or something other than a folder".format(
-                path
-            )
-        )
-    if status.st_uid != os.getuid():
-        raise OSError("{0} belongs to another account".format(path))
-    if stat.S_IMODE(status.st_mode) != 0o700:
-        os.chmod(path, 0o700)
-
-
-def _link(path: str, target: str) -> None:
-    """Make `path` a symbolic link to `target`, replacing whatever is there.
-
-    Left alone when it already is exactly that link. Otherwise the new link is
-    made under a name no other call can choose, in the same folder, and renamed
-    over `path` in one step, so two calls repairing it at once each leave a
-    whole link behind and neither can see a half-made one. A link that cannot be
-    put in place is removed again before the error goes on.
-    """
-    try:
-        if os.readlink(path) == target:
-            return
-    except OSError:
-        pass  # Absent, or not a link: replaced below either way.
-    temporary = os.path.join(
-        os.path.dirname(path),
-        ".{0}.{1}.tmp".format(os.path.basename(path), uuid.uuid4().hex),
-    )
-    os.symlink(target, temporary)
-    try:
-        os.replace(temporary, path)
-    except OSError:
-        try:
-            os.remove(temporary)
-        except OSError:
-            pass
-        raise
+    return tuple(env.items())
 
 
 def _modified(path: str) -> Optional[float]:
@@ -521,7 +444,8 @@ def _names(value: object) -> List[str]:
 
 
 def _plugin_fact(
-    runtime: str, script: str, deadline: Deadline, cwd: str
+    runtime: str, script: str, deadline: Deadline, cwd: str,
+    env: Optional[Tuple[Tuple[str, str], ...]] = None,
 ) -> str:
     """Describe exposed plugin routes without turning uncertainty into refusal.
 
@@ -532,7 +456,7 @@ def _plugin_fact(
     """
     try:
         listing = connectors.probe(
-            (runtime, script, "plugins", "list", "--json"), cwd, deadline
+            (runtime, script, "plugins", "list", "--json"), cwd, deadline, env=env
         )
     except BridgeError as error:
         return (
@@ -598,18 +522,20 @@ def _prerequisites(
     cwd: str,
     work: bool = False,
     attachments: Sequence[str] = (),
+    work_permission: Optional[str] = None,
 ) -> Tuple[str, str, str, str, Tuple[str, ...]]:
     """Everything that has to be true before starting ZCode is worth doing.
 
-    Seven questions in order, each cheap and none a model turn: is the runtime
-    here, is the bundle here, is its version one this connector was tested
+    Each question is cheap and none spends a model turn: is the runtime
+    here, is the bundle here, is its built-in provider path readable, is its
+    version one this connector was tested
     against, is this computer one it was tested on, what can be observed about
     sign-in, does any enabled plugin expose what no switch can remove, and are
     the switches the turn relies on really accepted - proven by passing them to
     a subcommand that spends no turn, because this program's help text lists
     switches its parser rejects. The switch set is the vector's own: a review
     turn proves the review switches, deny list included, and a work turn
-    proves the work switches - `--prompt`, `--mode edit`, `--cwd`,
+    proves the work switches - `--prompt`, the selected `--mode`, `--cwd`,
     `--output-format`, and `--attach` when an attachment travels - without the
     review deny list, which a work call never passes. Missing software,
     minimum local sign-in state, or required mechanics raises; plugin exposure
@@ -620,18 +546,21 @@ def _prerequisites(
     program as it is started, which version answered, how this computer
     describes itself, and what was observed about sign-in and plugins.
     """
+    connectors.validate_work_permission(HARNESS_ID, "work" if work else "review", work_permission)
+    mode = ("yolo" if work_permission == "full-access" else "edit") if work else "plan"
     warnings = []  # type: List[str]
     runtime, script = _program()
+    env = _environment(cwd)
     version = connectors.qualified_version(
-        connectors.probe((runtime, script, "--version"), cwd, deadline).stdout,
+        connectors.probe((runtime, script, "--version"), cwd, deadline, env=env).stdout,
         QUALIFICATION,
         warnings,
     )
     described = connectors.qualified_platform(QUALIFICATION, warnings)
     sign_in = _sign_in_facts()
-    plugins = _plugin_fact(runtime, script, deadline, cwd)
+    plugins = _plugin_fact(runtime, script, deadline, cwd, env=env)
 
-    help_call = connectors.probe((runtime, script, "--help"), cwd, deadline)
+    help_call = connectors.probe((runtime, script, "--help"), cwd, deadline, env=env)
     if work:
         switches = WORK_RESTRICTIONS
         if attachments:
@@ -647,7 +576,7 @@ def _prerequisites(
                 restrictions=switches,
             ),
         )
-        parser_switches = ("--mode", "edit", "--cwd", cwd)
+        parser_switches = ("--mode", mode, "--cwd", cwd)
         parser_names = ("--mode", "--cwd") + OUTPUT_FORMAT[:1]
     else:
         connectors.qualified_restrictions(help_call, QUALIFICATION)
@@ -657,6 +586,7 @@ def _prerequisites(
         (runtime, script, "version") + parser_switches + OUTPUT_FORMAT,
         cwd,
         deadline,
+        env=env,
     )
     if accepted.returncode != 0 or version not in accepted.stdout:
         raise BridgeError(
@@ -667,12 +597,11 @@ def _prerequisites(
                 (accepted.stderr or accepted.stdout).strip()[:160],
             ),
         )
-    mode = "edit" if work else "plan"
     if work:
-        warnings.append(WORK_WARNING)
+        warnings.append(FULL_ACCESS_WARNING if work_permission == "full-access" else WORK_WARNING)
     warnings.append(
         "ZCode cannot shed enabled plugins or directly configured MCP "
-        "servers per call, and {0} mode may admit non-destructive MCP tools; "
+        "servers per call, and {0} mode leaves their own permission routes available; "
         "{1}. {2}.".format(mode, plugins, sign_in)
     )
     warnings.append(
@@ -689,23 +618,25 @@ def _prerequisites(
 
 
 def check(
-    deadline: Deadline, cwd: str, mode: str = "review"
+    deadline: Deadline, cwd: str, mode: str = "review",
+    work_permission: Optional[str] = None,
 ) -> connectors.CheckResult:
     """Report whether ZCode could be used right now, spending no model turn.
 
     `cwd` is a neutral directory made for this command, so the questions are
     asked somewhere with nothing in it. No real project is touched, nothing
     is installed, nobody is logged in, no model or provider is chosen, and
-    nothing is written down for next time. The one thing that may be written is the
-    launcher's pair of links, when the bundle needs them to be started at all;
-    they hold no state and are checked again by every call. A work-mode check
+    nothing is written down for next time. Provider paths are checked by
+    metadata only and passed in this process's environment. A work-mode check
     proves the work vector's own switches - and, in the no-turn parser probe,
     passes no review deny-list switch the work command never carries.
     """
     program, version, described, account, warnings = _prerequisites(
-        deadline, cwd, work=(mode == "work")
+        deadline, cwd, work=(mode == "work"), work_permission=work_permission,
     )
-    return connectors.readiness(
+    permission = (work_permission or "edit") if mode == "work" else "plan"
+    shell = permission == "full-access"
+    checked = connectors.readiness(
         HARNESS_ID,
         program,
         version,
@@ -713,6 +644,17 @@ def check(
         account,
         warnings,
         authentication_confirmed=False,
+    )
+    return checked._replace(
+        message=checked.message + " Effective permission: {0}; headless shell {1}. "
+        "This parser check ran no model turn, Git command, or test.".format(
+            "Full access under your account" if shell else permission,
+            "enabled" if shell else "not enabled",
+        ),
+        effective_permission=permission,
+        headless_shell=shell,
+        shell_execution_verified=False,
+        selected_model_verified=False,
     )
 
 
@@ -747,7 +689,7 @@ def build_command(deadline: Deadline, cwd: str) -> connectors.PeerCommand:
         )
         + OUTPUT_FORMAT,
         cwd=cwd,
-        env=connectors.environment(),
+        env=_environment(cwd),
         body_argument=BODY_ARGUMENT,
         warnings=warnings,
     )
@@ -762,32 +704,35 @@ def build_work_command(
     required_model: Optional[str] = None,
     model: Optional[str] = None,
     effort: Optional[str] = None,
+    work_permission: Optional[str] = None,
 ) -> connectors.PeerCommand:
-    """The ordinary ZCode prompt in `edit` mode, with its real tool set.
+    """The ZCode prompt with one explicit, per-call permission handoff.
 
     Two things from the review vector are deliberately absent: the tool deny
     list, because work needs the ordinary tool set, and `plan` mode. The mode
     a bare `--prompt` would get is `yolo`, which auto-approves everything, so
-    the vector names `edit` on every call: workspace file edits are allowed,
+    the vector defaults to `edit`: workspace file edits are allowed,
     and anything else that would need an approval is denied - a headless
     prompt has no approver, and ZCode's default broker denies rather than
-    asks. Declared access directories are recorded in the session and stay
+    asks. An explicit `full-access` choice instead selects native `yolo` for
+    this call, so approved shell work can run headlessly under the account.
+    No global setting is changed. Declared access directories are recorded in the session and stay
     reachable as ordinary same-user paths; ZCode has no per-call switch that
     widens its working root. Each attachment becomes one `--attach`, which
     ZCode reads and hands to the model as inline image content.
     """
     runtime, script = _program()
     _program_name, _version, _described, _account, warnings = _prerequisites(
-        deadline, cwd, work=True, attachments=attachments
+        deadline, cwd, work=True, attachments=attachments, work_permission=work_permission,
     )
-    argv = [runtime, script, "--mode", "edit", "--cwd", cwd]
+    argv = [runtime, script, "--mode", "yolo" if work_permission == "full-access" else "edit", "--cwd", cwd]
     for attachment in attachments:
         argv.extend(("--attach", attachment))
     argv.extend(OUTPUT_FORMAT)
     return connectors.PeerCommand(
         argv=tuple(argv),
         cwd=cwd,
-        env=connectors.environment(),
+        env=_environment(cwd),
         body_argument=BODY_ARGUMENT,
         warnings=warnings,
     )

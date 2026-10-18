@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     check.add_argument("--peer", required=True)
     check.add_argument("--mode", choices=("review", "work"))
+    check.add_argument("--work-permission", choices=("full-access",))
     check.add_argument("--json", action="store_true")
 
     run = subcommands.add_parser(
@@ -81,6 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
              "none refuses it before publication",
     )
     run.add_argument("--events-jsonl", action="store_true")
+    run.add_argument("--work-permission", choices=("full-access",),
+                     help="select ZCode Full access for this work call only; allows shell execution under your account")
     run.add_argument("--attachment", action="append")
     run.add_argument("--note-ref")
     run.add_argument("--purpose")
@@ -154,10 +157,16 @@ def _check_directory() -> Iterator[str]:
 
 
 def _check(args: argparse.Namespace) -> connectors.CheckResult:
-    connector = connectors.resolve(args.peer)
     mode = args.mode or "review"
+    connectors.validate_work_permission(args.peer, mode, args.work_permission)
+    connector = connectors.resolve(args.peer)
     with _check_directory() as cwd:
         if mode == "work":
+            if args.work_permission is not None:
+                return connector.check(
+                    Deadline(READINESS_TIMEOUT_SECONDS), cwd, mode="work",
+                    work_permission=args.work_permission,
+                )
             return connector.check(
                 Deadline(READINESS_TIMEOUT_SECONDS), cwd, mode="work"
             )
@@ -212,6 +221,10 @@ def _check_json(args: argparse.Namespace) -> int:
         )
         if checked.selected_model_verified is not None:
             result["selected_model_verified"] = checked.selected_model_verified
+        for field in ("effective_permission", "headless_shell", "shell_execution_verified"):
+            value = getattr(checked, field)
+            if value is not None:
+                result[field] = value
     except BridgeError as error:
         reason, next_action = guidance(error.failure)
         if error.detail:
@@ -278,6 +291,7 @@ def _run(args: argparse.Namespace) -> Tuple[int, Optional[str]]:
         required_model=args.require_model,
         model=args.model,
         effort=args.effort,
+        work_permission=args.work_permission,
         attachments=tuple(args.attachment or ()),
         note_ref=args.note_ref,
         purpose=args.purpose,

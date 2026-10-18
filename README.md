@@ -126,12 +126,13 @@ the required mechanics remain usable, Bridge proceeds with a warning.
   `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs` instead of a
   `zcode` command on `PATH`.
 
-One note for ZCode: when the installed app ships the bundle's built-in
-provider file where the bundle does not look for it, Bridge starts the
-bundle through `~/Library/Caches/agent-bridge/zcode-launcher`, an
-owner-only folder holding just two symbolic links (one to the bundle, one
-to that file). That launcher folder is the only thing Bridge writes outside
-its sessions.
+One note for ZCode: Bridge passes the installed app's own built-in provider
+file and ZCode's native personal provider path through its per-process
+`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` and
+`ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` variables. Existing path choices and
+`ZCODE_DATA_BASE_DIR` are preserved. Readiness checks that the built-in file
+exists and is readable, without opening either provider file. Bridge writes
+no launcher or global configuration.
 
 ## Get the source
 
@@ -243,8 +244,14 @@ requested line: Bridge work mode says hello.
 The session folder holds `SESSION.md` (the immutable binding), a numbered
 request and response under `messages/`, and the lock used during the turn.
 A work call runs under the tool's ordinary capabilities and its own normal
-permissions — Bridge selects no approval bypass and no permission posture
-of its own. If the tool cannot complete the call, the request remains as an
+permissions. For ZCode, work defaults to Edit; an explicit
+`--work-permission full-access` on `run` selects native Full access
+(`--mode yolo`) for that turn only, allowing shell commands for approved
+Git work and tests under your account. The same option on
+`check --peer zcode --mode work --json` checks that exact launch mode and
+reports `effective_permission`, `headless_shell`, and
+`shell_execution_verified: false`: it runs no model turn, Git command, or test.
+The option is refused for other tools and review calls and changes no global setting. If the tool cannot complete the call, the request remains as an
 honest record, no response is invented, and the failure names the reason
 and one next action.
 
@@ -413,9 +420,9 @@ suppresses repository instructions nor deletes or hides those logs.
 Review calls use each connector's strongest practical vendor safeguards
 and warn about the remaining limits; work calls use the tool's ordinary
 capabilities under its own normal permissions, keep every warning that
-still applies, and add the ones that matter to work. Bridge never selects
-an approval bypass to make a headless call succeed, and selects no
-permission posture of its own either — for Codex it reports the apparent
+still applies, and add the ones that matter to work. ZCode Full access requires the explicit per-call option described above;
+ordinary ZCode work keeps Edit and review keeps Plan. Other tools retain
+their normal permissions — for Codex Bridge reports the apparent
 posture read from the top of the user's config in a warning and lets
 codex's own run-time enforcement govern. Warnings do not block a usable
 call, require approval, or store consent.

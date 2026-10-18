@@ -2013,72 +2013,108 @@ class SixTargetConnectorBehavior(unittest.TestCase):
         ):
             self.assertIn(phrase, hermes.WARNING)
 
-    def test_zcode_starts_through_a_launcher_only_when_its_layout_needs_one(self):
+    def test_zcode_provider_paths_are_per_process_and_keep_native_identity(self):
         resources = os.path.join(self.temp, "ZCode.app", "Contents", "Resources")
         script = os.path.join(resources, "glm", "zcode.cjs")
         builtin = os.path.join(resources, "config", "provider", "zcode-builtin.json")
-        bundled = os.path.join(resources, "glm", "provider", "zcode-builtin.json")
-        launcher = os.path.join(self.temp, "Caches", "agent-bridge", "zcode-launcher")
-        entry = os.path.join(launcher, "zcode.cjs")
-        provider_link = os.path.join(launcher, "provider", "zcode-builtin.json")
-
-        def write(path):
+        custom = os.path.join(self.temp, "chosen-provider.json")
+        for path in (script, builtin, custom):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write("{}\n")
+        empty_paths = {
+            zcode.BUILTIN_PROVIDER_VARIABLE: "",
+            zcode.PERSONAL_PROVIDER_VARIABLE: "",
+        }
+        with mock.patch.multiple(zcode, SCRIPT=script, BUILTIN_PROVIDER=builtin), \
+                mock.patch.object(zcode.connectors, "executable", return_value="/fake/node"), \
+                mock.patch.dict(os.environ, empty_paths):
+            self.assertEqual(zcode._program(), ("/fake/node", script))
+            cases = (
+                ({zcode.DATA_BASE_DIR_VARIABLE: self.temp}, builtin,
+                 os.path.join(self.temp, ".zcode", "v2", "provider_config.json")),
+                ({zcode.BUILTIN_PROVIDER_VARIABLE: custom,
+                  zcode.DATA_BASE_DIR_VARIABLE: self.temp}, custom,
+                 os.path.join(self.temp, ".zcode", "v2", "provider_config.json")),
+                ({zcode.PERSONAL_PROVIDER_VARIABLE: "/chosen/personal.json"},
+                 builtin, "/chosen/personal.json"),
+                ({zcode.BUILTIN_PROVIDER_VARIABLE: " chosen-provider.json ",
+                  zcode.PERSONAL_PROVIDER_VARIABLE: "/chosen/personal.json"},
+                 " chosen-provider.json ", "/chosen/personal.json"),
+            )
+            for supplied, expected_builtin, expected_personal in cases:
+                with self.subTest(supplied=supplied), mock.patch.dict(os.environ, supplied):
+                    before = dict(os.environ)
+                    env = dict(zcode._environment(self.temp))
+                    self.assertEqual(env[zcode.BUILTIN_PROVIDER_VARIABLE], expected_builtin)
+                    self.assertEqual(env[zcode.PERSONAL_PROVIDER_VARIABLE], expected_personal)
+                    self.assertEqual(dict(os.environ), before)
+                    self.assertTrue(all(env[name] == value for name, value in before.items()
+                                        if name not in empty_paths))
+            with mock.patch.dict(os.environ, {}, clear=True):
+                env = dict(zcode._environment(self.temp))
+                self.assertEqual(env[zcode.PERSONAL_PROVIDER_VARIABLE], os.path.join(
+                    os.path.expanduser("~"), ".zcode", "v2", "provider_config.json"))
+        # The direct bundle and process environment need no cache or links.
+        self.assertFalse(os.path.exists(os.path.join(self.temp, "Caches")))
 
-        def program():
-            with mock.patch.multiple(
-                zcode, SCRIPT=script, BUILTIN_PROVIDER=builtin, LAUNCHER=launcher
-            ), mock.patch.object(
-                zcode.connectors, "executable", return_value="/fake/node"
-            ):
-                return zcode._program()
+    def test_zcode_provider_paths_unavailable_fail_readiness_before_probes(self):
+        missing = os.path.join(self.temp, "missing-builtin.json")
+        with mock.patch.object(zcode, "_program", return_value=("/fake/node", "/fake/zcode.cjs")), \
+                mock.patch.object(zcode.connectors, "probe") as probe, \
+                mock.patch.dict(os.environ, {zcode.BUILTIN_PROVIDER_VARIABLE: missing}):
+            for path in (missing, self.temp):
+                with self.subTest(path=path), mock.patch.dict(os.environ, {
+                        zcode.BUILTIN_PROVIDER_VARIABLE: path}):
+                    with self.assertRaises(BridgeError) as caught:
+                        zcode.check(peer.Deadline(30.0), self.temp, mode="work",
+                                    work_permission="full-access")
+                    self.assertEqual(caught.exception.failure, Failure.MISSING_CLI)
+                    self.assertIn(path, caught.exception.detail)
+                    self.assertIn("provider configuration is not a readable file",
+                                  caught.exception.detail)
+            with mock.patch.object(zcode.os.path, "isfile", return_value=True), \
+                    mock.patch.object(zcode.os, "access", return_value=False):
+                with self.assertRaises(BridgeError):
+                    zcode.check(peer.Deadline(30.0), self.temp, mode="work")
+            probe.assert_not_called()
 
-        # The app ships the provider file only where the bundle does not look:
-        # an owner-only launcher is made holding exactly the two links.
-        write(script)
-        write(builtin)
-        self.assertEqual(program(), ("/fake/node", entry))
-        self.assertEqual(os.readlink(entry), script)
-        self.assertEqual(os.readlink(provider_link), builtin)
-        for folder in (launcher, os.path.dirname(provider_link)):
-            self.assertEqual(os.lstat(folder).st_mode & 0o777, 0o700)
-        self.assertEqual(sorted(os.listdir(launcher)), ["provider", "zcode.cjs"])
+    def test_zcode_provider_paths_match_readiness_and_each_turn(self):
+        builtin = os.path.join(self.temp, "zcode-builtin.json")
+        with open(builtin, "w", encoding="utf-8") as handle:
+            handle.write("{}\n")
+        environments = []
 
-        # A link pointing elsewhere is replaced, with nothing left beside it.
-        os.remove(provider_link)
-        os.symlink(script, provider_link)
-        self.assertEqual(program(), ("/fake/node", entry))
-        self.assertEqual(os.readlink(provider_link), builtin)
-        self.assertEqual(
-            os.listdir(os.path.dirname(provider_link)), ["zcode-builtin.json"]
-        )
+        def probe(argv, cwd, deadline, env=None):
+            environments.append(env)
+            if argv[2] in ("--version", "version"):
+                return CompletedCall(0, "zcode 0.16.5\n", "")
+            if argv[2] == "plugins":
+                return CompletedCall(0, "[]", "")
+            return CompletedCall(0, "--prompt --mode --cwd --disallowed-tools", "")
 
-        # A launcher that is itself a link is refused, and nothing is written
-        # where it points.
-        elsewhere = os.path.join(self.temp, "elsewhere")
-        os.mkdir(elsewhere)
-        shutil.rmtree(launcher)
-        os.symlink(elsewhere, launcher)
-        with self.assertRaises(BridgeError) as caught:
-            program()
-        self.assertEqual(caught.exception.failure, Failure.MISSING_CLI)
-        self.assertIn(launcher, caught.exception.detail)
-        self.assertEqual(os.listdir(elsewhere), [])
-        os.remove(launcher)
-
-        # The vendor's own layout restored: the bundle is started directly.
-        write(bundled)
-        self.assertEqual(program(), ("/fake/node", script))
-        self.assertFalse(os.path.lexists(launcher))
-
-        # The app's own provider file absent too: started directly, so the
-        # bundle reports its own error.
-        os.remove(bundled)
-        os.remove(builtin)
-        self.assertEqual(program(), ("/fake/node", script))
-        self.assertFalse(os.path.lexists(launcher))
+        with mock.patch.object(zcode, "_program", return_value=("/fake/node", "/fake/zcode.cjs")), \
+                mock.patch.object(zcode, "BUILTIN_PROVIDER", builtin), \
+                mock.patch.object(zcode.connectors, "qualified_platform", return_value="Darwin 26 arm64"), \
+                mock.patch.object(zcode, "_sign_in_facts", return_value="sign-in observed"), \
+                mock.patch.object(zcode.connectors, "probe", side_effect=probe), \
+                mock.patch.dict(os.environ, {
+                    zcode.BUILTIN_PROVIDER_VARIABLE: "",
+                    zcode.PERSONAL_PROVIDER_VARIABLE: "",
+                    zcode.DATA_BASE_DIR_VARIABLE: self.temp,
+                }):
+            for mode, permission in (("review", None), ("work", None), ("work", "full-access")):
+                with self.subTest(mode=mode, permission=permission):
+                    zcode.check(peer.Deadline(30.0), self.temp, mode=mode,
+                                work_permission=permission)
+                    command = (zcode.build_command(peer.Deadline(30.0), self.temp)
+                               if mode == "review" else zcode.build_work_command(
+                                   peer.Deadline(30.0), self.temp, work_permission=permission))
+                    self.assertTrue(all(env == command.env for env in environments))
+                    self.assertEqual(dict(command.env)[zcode.BUILTIN_PROVIDER_VARIABLE], builtin)
+                    self.assertEqual(dict(command.env)[zcode.PERSONAL_PROVIDER_VARIABLE], os.path.join(
+                        self.temp, ".zcode", "v2", "provider_config.json"))
+                    environments.clear()
 
     def test_readiness_distinguishes_confirmed_and_unconfirmed_authentication(self):
         confirmed = (

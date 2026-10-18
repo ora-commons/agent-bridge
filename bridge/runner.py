@@ -527,6 +527,7 @@ def run_turn(
     event_writer: Optional[EventWriter] = None,
     build_work_command: Optional[WorkCommandBuilder] = None,
     no_timeout: bool = False,
+    work_permission: Optional[str] = None,
 ):
     """Publish one request and one response for the session's fixed target.
 
@@ -568,6 +569,7 @@ def run_turn(
         session_dir, body, wait, build_command, warning_writer, max_steps,
         required_model, model, effort, attachments, note_ref, purpose,
         event_writer, build_work_command,
+        work_permission,
     )
     try:
         outcome = generator.send(None)
@@ -591,9 +593,11 @@ def _turn(
     purpose: Optional[str],
     event_writer: Optional[EventWriter],
     build_work_command: Optional[WorkCommandBuilder],
+    work_permission: Optional[str],
 ):
     """One whole turn as a generator: a bounded wait suspends it mid-turn."""
     record = session_module.read_session(session_dir)
+    connectors.validate_work_permission(record.peer, record.mode, work_permission)
     has_minimax_options = max_steps is not None or required_model is not None
     if has_minimax_options and record.peer != "minimax":
         raise BridgeError(
@@ -806,6 +810,9 @@ def _turn(
                         if build_work_command is not None
                         else connector.build_work_command
                     )
+                    work_options = {}
+                    if work_permission is not None:
+                        work_options["work_permission"] = work_permission
                     command = builder(
                         deadline,
                         cwd,
@@ -815,6 +822,7 @@ def _turn(
                         required_model=required_model,
                         model=model,
                         effort=effort,
+                        **work_options,
                     )
                 elif has_minimax_options or has_named_choice:
                     builder = build_command or connector.build_command
