@@ -201,6 +201,9 @@ class CheckResult(NamedTuple):
     authentication_confirmed: bool = True
     qualified: Optional[bool] = None
     selected_model_verified: Optional[bool] = None
+    effective_permission: Optional[str] = None
+    headless_shell: Optional[bool] = None
+    shell_execution_verified: Optional[bool] = None
 
 
 class Capabilities(NamedTuple):
@@ -218,6 +221,17 @@ class Capabilities(NamedTuple):
     work_detail: str
     image: str
     image_detail: str
+
+
+def validate_work_permission(harness_id: str, mode: str, permission: Optional[str]) -> None:
+    """An explicit permission choice belongs only to one ZCode work call."""
+    if permission is not None and (
+        harness_id != "zcode" or mode != "work" or permission != "full-access"
+    ):
+        raise BridgeError(
+            Failure.USAGE_ERROR,
+            detail="--work-permission full-access is available only for ZCode work calls",
+        )
 
 
 class ChoiceSwitches(NamedTuple):
