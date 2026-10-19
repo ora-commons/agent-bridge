@@ -331,7 +331,7 @@ def inspect() -> None:
     _require(
         options
         == {
-            "check": {"--peer", "--mode", "--json"},
+            "check": {"--peer", "--mode", "--work-permission", "--json"},
             "run": {
                 "--session",
                 "--timeout",
@@ -341,6 +341,7 @@ def inspect() -> None:
                 "--model",
                 "--effort",
                 "--events-jsonl",
+                "--work-permission",
                 "--attachment",
                 "--note-ref",
                 "--purpose",
