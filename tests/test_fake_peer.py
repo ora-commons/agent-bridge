@@ -2354,6 +2354,7 @@ class SixTargetConnectorBehavior(unittest.TestCase):
             required_model="minimax/MiniMax-M3",
             model=None,
             effort=None,
+            work_permission=None,
             attachments=(),
             note_ref=None,
             purpose=None,
@@ -3442,6 +3443,7 @@ class CommandLineBody(unittest.TestCase):
                 "--model",
                 "--effort",
                 "--events-jsonl",
+                "--work-permission",
                 "--attachment",
                 "--note-ref",
                 "--purpose",
@@ -3449,7 +3451,7 @@ class CommandLineBody(unittest.TestCase):
         )
         self.assertEqual(
             release_conformance._command_options(cli.build_parser())["check"],
-            {"--peer", "--mode", "--json"},
+            {"--peer", "--mode", "--work-permission", "--json"},
         )
         self.assertEqual(
             release_conformance._command_options(cli.build_parser())["record"],
