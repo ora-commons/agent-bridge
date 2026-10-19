@@ -382,33 +382,26 @@ def _recorded_choices(thread_id: str) -> Tuple[Optional[str], Optional[str]]:
     """Read the model and effort Codex itself recorded for one thread.
 
     Codex keeps one rollout file per call, named
-    `rollout-<time>-<thread id>.jsonl` under a date directory of the
-    `sessions` directory in the Codex home. The date and the timestamp are
-    Codex's, not this connector's, so every date directory is scanned for a
-    rollout whose name ends in that thread id, and the first one that
-    supplies a `turn_context` line answers. A thread id names one call, so
-    at most one rollout matches for real. Any failure to list, open, or
-    read is left as an unreadable lookup for the caller to report.
+    `rollout-<time>-<thread id>.jsonl` under date directories of the
+    `sessions` directory in the Codex home; current Codex nests those
+    date directories year, month, and day deep, and older Codex kept
+    them one level below `sessions`. The date and the timestamp are
+    Codex's, not this connector's, so the sessions tree - and nothing
+    outside it - is walked for a rollout whose name ends in that thread
+    id, and the first one that supplies a `turn_context` line answers.
+    A thread id names one call, so at most one rollout matches for real.
+    Any failure to list, open, or read is left as an unreadable lookup
+    for the caller to report.
     """
     sessions = os.path.join(_codex_home(), "sessions")
     suffix = "-" + thread_id + ".jsonl"
-    try:
-        days = sorted(os.listdir(sessions))
-    except OSError:
-        return None, None
-    for day in days:
-        day_directory = os.path.join(sessions, day)
-        if not os.path.isdir(day_directory):
-            continue
-        try:
-            names = sorted(os.listdir(day_directory))
-        except OSError:
-            continue
-        for name in names:
+    for directory, subdirectories, names in os.walk(sessions):
+        subdirectories.sort()
+        for name in sorted(names):
             if not (name.startswith("rollout-") and name.endswith(suffix)):
                 continue
             model, effort = _turn_context_choices(
-                os.path.join(day_directory, name)
+                os.path.join(directory, name)
             )
             if model is not None or effort is not None:
                 return model, effort

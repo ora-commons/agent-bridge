@@ -1604,7 +1604,7 @@ class CodexStructuredDispatch(unittest.TestCase):
         lines a choices report does not carry.
         """
         rollout = os.path.join(
-            self.codex_home, "sessions", "2026-10-19",
+            self.codex_home, "sessions", "2026", "10", "19",
             "rollout-2026-10-19T09-00-00-thread-choices.jsonl",
         )
         os.environ["BRIDGE_FAKE_CODEX_ROLLOUT"] = rollout
