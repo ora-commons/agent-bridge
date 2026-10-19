@@ -1,6 +1,6 @@
 """Starting one program, waiting for one answer, and leaving nothing behind.
 
-Everything Agent Bridge starts is started here, the same way, and cleaned up
+Everything Ora Agent Bridge starts is started here, the same way, and cleaned up
 the same way. There is one function worth understanding for the programs a
 turn asks questions of, `run_bounded`, and one construct for the AI work
 itself, `start_call`: the first bounds a probe with a deadline because a
@@ -22,7 +22,7 @@ anything it starts. That group is the exact set of processes this turn owns.
 Cleanup signals that group and nothing else - never a name, never a scan of
 unrelated processes, never a guess. Before signalling anything, the code
 confirms that the group's number really is the child's own process id, which is
-the check that makes it impossible to signal the group Agent Bridge itself is
+the check that makes it impossible to signal the group Ora Agent Bridge itself is
 running in.
 
 On Windows the same ownership is built with that platform's own primitives,
@@ -42,7 +42,7 @@ whatever it starts with its first instruction - is a member of that job with
 no breakaway allowed, and the tree stays owned whichever of its processes
 dies first. Closing this code's handle to the job is the forced phase - the
 kernel terminates every member, root or descendant - and the same close is
-what happens if Agent Bridge itself is killed, because the operating system
+what happens if Ora Agent Bridge itself is killed, because the operating system
 closes a process's handles when it ends. The operating system's own
 `taskkill /T /F` on the root pid remains as a belt-and-braces force and as
 the confirmation, with one limit: its tree walk starts at the root, so once
@@ -57,7 +57,7 @@ are covered by the unit checks with the Windows primitives simulated, and
 that limit is stated rather than hidden.
 
 **What ends the waiting.** For a bounded probe (`run_bounded`): the program
-answers, the deadline passes, or somebody stops Agent Bridge. For AI work
+answers, the deadline passes, or somebody stops Ora Agent Bridge. For AI work
 (`start_call`): the peer answers, or somebody stops the run - there is no
 elapsed-time deadline at all, and a bounded wait that runs out merely returns
 control with the peer still running, its result still collectable by the
@@ -306,7 +306,7 @@ class SignalStop(Exception):
 
     def __init__(self, number: int) -> None:
         super().__init__(
-            "Agent Bridge was stopped by signal {0}, so the turn did not "
+            "Ora Agent Bridge was stopped by signal {0}, so the turn did not "
             "finish.".format(number)
         )
         self.number = number
@@ -1313,7 +1313,7 @@ def run_bounded(
     `spawn_failure` when the program could not be started at all, and
     `CLEANUP_FAILURE` when something this turn started outlived it, or when
     the platform would not let this turn own what it started. Raises
-    `SignalStop` when somebody terminates or hangs up Agent Bridge while the
+    `SignalStop` when somebody terminates or hangs up Ora Agent Bridge while the
     program is running. Cleanup runs on every one of those exit paths, and on
     success too.
     """

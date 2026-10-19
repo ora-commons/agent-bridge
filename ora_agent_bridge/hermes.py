@@ -1,7 +1,7 @@
 """Calling Hermes Agent with its strongest practical courier posture.
 
 Hermes Agent is Nous Research's command-line coding agent. This module is the
-whole of what Agent Bridge knows about it: which program to start, which
+whole of what Ora Agent Bridge knows about it: which program to start, which
 switches must be on it, how the message reaches it, and how to tell - without
 spending a model turn - whether starting it would work at all.
 
@@ -237,7 +237,7 @@ def _signed_in(status: CompletedCall) -> str:
         raise BridgeError(
             Failure.AUTHENTICATION_REQUIRED,
             detail="hermes is signed in to the Nous Portal but its "
-            "configuration selects another inference provider; Agent Bridge "
+            "configuration selects another inference provider; Ora Agent Bridge "
             "runs a peer only on its subscription",
         )
     return "signed in to the Nous Portal, which is the configured provider"

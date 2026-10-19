@@ -1,6 +1,6 @@
 """One lock per session, held by one process, for one turn.
 
-Two Agent Bridge turns must never write into the same session at the same time,
+Two Ora Agent Bridge turns must never write into the same session at the same time,
 because they would both believe they had the next message number. The way that
 is prevented is deliberately the oldest and dullest one available: an advisory
 lock taken out on a file, held open by the running process. Each platform

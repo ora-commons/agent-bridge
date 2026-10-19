@@ -24,7 +24,7 @@ from . import VERSION, connectors, record as record_module, runner
 from .errors import BridgeError, Failure, guidance
 from .peer import READINESS_TIMEOUT_SECONDS, Deadline, SignalStop
 
-PROGRAM = "agent-bridge"
+PROGRAM = "ora-agent-bridge"
 NEUTRAL_PREFIX = "agent-bridge-neutral-"
 
 

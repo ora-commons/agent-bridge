@@ -1,7 +1,7 @@
 """The hand-written MiniMax Code courier connector.
 
 MiniMax Code 0.2.7 has a stable headless ``mcode exec`` transport, but no
-headless permission mode that confines its tools. Agent Bridge therefore gives
+headless permission mode that confines its tools. Ora Agent Bridge therefore gives
 its review calls only a task-owned neutral directory and reports the remaining
 tool and configuration authority instead of presenting ``smart`` as a sandbox.
 Work calls use the same ``exec`` under the program's own ordinary defaults and
@@ -254,7 +254,7 @@ def _prerequisites(
     warnings.append(
         "MiniMax has no state-free noninteractive authentication check: "
         "provider list can initialize its runtime and refresh or invalidate "
-        "OAuth state, so Agent Bridge does not run it. Live authentication "
+        "OAuth state, so Ora Agent Bridge does not run it. Live authentication "
         "remains unconfirmed until the selected bounded call."
     )
     return (

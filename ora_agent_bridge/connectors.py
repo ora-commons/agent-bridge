@@ -1,6 +1,6 @@
-"""The six target CLIs Agent Bridge can call, and how one call is described.
+"""The six target CLIs Ora Agent Bridge can call, and how one call is described.
 
-Agent Bridge knows exactly six target CLIs, named once here and never
+Ora Agent Bridge knows exactly six target CLIs, named once here and never
 discovered at runtime. Looking one up is a literal six-way switch: there is no
 registry, plugin search, name-derived import, or connector base class. Adding a
 target means editing this file, which is the point - the set of programs the
@@ -92,41 +92,61 @@ class Qualification(NamedTuple):
     restrictions: Tuple[str, ...]
 
 
+#: The plain wording a choices report carries for a half the connector
+#: looked for in the tool's own records and could not read. It states that
+#: the tool did not report the value; a value is never inferred from the
+#: request to fill the place.
+NOT_REPORTED = "not reported"
+
+
 class AttributedText(str):
     """A final response text carrying the identity the tool itself reported.
 
     A parser that reads a structured output format may learn, from that
     output alone, which provider and model actually answered the call. This
     is that same final text - it is a `str`, compares equal to the plain
-    extracted text, and publishes as that text - with the two reported
-    halves attached, so an identity the tool reported, and the connector
-    validated, travels on to the response record and the finished event
-    instead of being discarded. A parser whose output format reports no
-    identity keeps returning the plain string, exactly as before.
+    extracted text, and publishes as that text - with the reported halves
+    attached, so an identity the tool reported, and the connector validated,
+    travels on to the response record and the finished event instead of
+    being discarded. A parser whose output format reports no identity keeps
+    returning the plain string, exactly as before.
 
-    Each attribute is the exact single-line string the tool's own output
-    named, or `None` when it named neither: a connector never infers,
+    Each attribute is the exact single-line string the tool's own output or
+    records named, or `None` when it named none: a connector never infers,
     defaults, or fills a half from its own vector or configuration, so an
     absent half stays absent rather than becoming an empty placeholder. The
     strings are attached only after the connector has validated them - the
     way MiniMax's byte-exact `--require-model` comparison does - so a
-    header line they become is a line the tool really reported.
+    header line they become is a line the tool really reported. The one
+    wording a connector may attach without the tool naming a value is the
+    plain negative report of a lookup it performed and could not read:
+    where a connector reads the model or effort the tool recorded for the
+    call, and the record cannot be read, it attaches the plain words
+    "not reported" for that half rather than guessing, and never a value
+    taken from the request.
+
+    `effort` is the reasoning effort the tool's own records named for the
+    call, beside the model; a parser that reads no effort keeps it `None`.
     """
 
     #: The provider the tool's output named as having answered, or None.
     provider = None  # type: Optional[str]
     #: The model the tool's output named as having answered, or None.
     model = None  # type: Optional[str]
+    #: The effort the tool's records named for the call, or None.
+    effort = None  # type: Optional[str]
 
     def __new__(
         cls,
         text: str,
         provider: Optional[str] = None,
         model: Optional[str] = None,
+        effort: Optional[str] = None,
     ) -> "AttributedText":
         attributed = super().__new__(cls, text)
         attributed.provider = provider
         attributed.model = model
+        attributed.effort = effort
         return attributed
 
 
@@ -320,7 +340,7 @@ EVIDENCE_MARKER = "outside the release evidence"
 def environment() -> Tuple[Tuple[str, str], ...]:
     """What a peer program inherits: this process's own environment, unchanged.
 
-    Agent Bridge does not compose an environment for a harness. Each one finds
+    Ora Agent Bridge does not compose an environment for a harness. Each one finds
     its own authentication, subscription and settings where it normally does,
     and the bridge has no opinion about any of them. Restriction is done with
     the harness's own documented switches, because that is the only place it can
@@ -553,7 +573,7 @@ def _switch(harness_id: str) -> Optional[Any]:
     """Resolve one identifier to its connector, or raise for an unknown name.
 
     The branches are written out one by one on purpose: this is the whole list
-    of programs Agent Bridge is willing to start, and every one of the six
+    of programs Ora Agent Bridge is willing to start, and every one of the six
     resolves to a module.
 
     They are imported inside this function for one ordinary reason: each of

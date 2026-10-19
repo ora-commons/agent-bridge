@@ -79,7 +79,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from bridge import (  # noqa: E402
+from ora_agent_bridge import (  # noqa: E402
     claude,
     cli,
     codex,
@@ -93,10 +93,10 @@ from bridge import (  # noqa: E402
     session,
     zcode,
 )
-from bridge.connectors import COMMAND_LINE_BODY_LIMIT, PeerCommand  # noqa: E402
-from bridge.errors import BridgeError, Failure  # noqa: E402
-from bridge.locking import lock_path, session_lock  # noqa: E402
-from bridge.peer import CompletedCall  # noqa: E402
+from ora_agent_bridge.connectors import COMMAND_LINE_BODY_LIMIT, PeerCommand  # noqa: E402
+from ora_agent_bridge.errors import BridgeError, Failure  # noqa: E402
+from ora_agent_bridge.locking import lock_path, session_lock  # noqa: E402
+from ora_agent_bridge.peer import CompletedCall  # noqa: E402
 from tests import release_conformance  # noqa: E402
 
 FAKE_PEER = os.path.join(REPO_ROOT, "tests", "fake_peer.py")
@@ -142,7 +142,7 @@ _DRIVER_CALL = (
 _DRIVER_HEAD = (
     "import os, signal, sys\n"
     "sys.path.insert(0, sys.argv[1])\n"
-    "from bridge import peer\n"
+    "from ora_agent_bridge import peer\n"
 )
 
 #: Waits for the peer, and is stopped from outside while it waits.
@@ -201,7 +201,7 @@ SECOND_STOP_DRIVER = (
 PUBLISH_STOP_DRIVER = (
     "import os, sys, time\n"
     "sys.path.insert(0, sys.argv[1])\n"
-    "from bridge import peer, session\n"
+    "from ora_agent_bridge import peer, session\n"
     "target, marker = sys.argv[3], sys.argv[4]\n"
     "real_replace = os.replace\n"
     "def replace(source, destination):\n"
@@ -619,7 +619,7 @@ class TurnBehavior(unittest.TestCase):
                 [
                     sys.executable,
                     "-m",
-                    "bridge",
+                    "ora_agent_bridge",
                     "record",
                     "--session",
                     self.session_dir,
@@ -1782,12 +1782,12 @@ class SixTargetConnectorBehavior(unittest.TestCase):
         self.assertEqual(connectors.HARNESS_IDS, self.TARGETS)
         source = (
             "import sys\n"
-            "from bridge import connectors\n"
+            "from ora_agent_bridge import connectors\n"
             "selected = sys.argv[1]\n"
             "connector = connectors.resolve(selected)\n"
             "targets = set(connectors.HARNESS_IDS)\n"
             "loaded = sorted(name.rsplit('.', 1)[1] for name in sys.modules "
-            "if name.startswith('bridge.') and name.rsplit('.', 1)[1] in targets)\n"
+            "if name.startswith('ora_agent_bridge.') and name.rsplit('.', 1)[1] in targets)\n"
             "print(connector.HARNESS_ID + ':' + ','.join(loaded))\n"
         )
         for selected in self.TARGETS:

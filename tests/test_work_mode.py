@@ -62,7 +62,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from bridge import (  # noqa: E402
+from ora_agent_bridge import (  # noqa: E402
     claude,
     cli,
     codex,
@@ -77,9 +77,9 @@ from bridge import (  # noqa: E402
     session,
     zcode,
 )
-from bridge.connectors import PeerCommand  # noqa: E402
-from bridge.errors import BridgeError, Failure  # noqa: E402
-from bridge.peer import CompletedCall  # noqa: E402
+from ora_agent_bridge.connectors import PeerCommand  # noqa: E402
+from ora_agent_bridge.errors import BridgeError, Failure  # noqa: E402
+from ora_agent_bridge.peer import CompletedCall  # noqa: E402
 from tests.test_fake_peer import FAKE_PEER  # noqa: E402
 
 #: How the fake peer reports the two processes a cleanup has to end.
@@ -129,7 +129,7 @@ def _await_reported_pids(pid_path, timeout=10.0):
 WINDOWS_SIGNAL_DRIVER = (
     "import os, signal, sys\n"
     "sys.path.insert(0, sys.argv[1])\n"
-    "from bridge import peer\n"
+    "from ora_agent_bridge import peer\n"
     "pid_file = sys.argv[4]\n"
     "def tree_pids(pgid):\n"
     "    pids = [pgid]\n"
@@ -654,8 +654,8 @@ class WorkTurnBehavior(unittest.TestCase):
         source = """
 import io, os, sys
 sys.path.insert(0, sys.argv[1])
-from bridge import cli, connectors, peer, runner
-from bridge.connectors import PeerCommand
+from ora_agent_bridge import cli, connectors, peer, runner
+from ora_agent_bridge.connectors import PeerCommand
 class FakeConnector:
     CAPABILITIES = connectors.Capabilities('supported', 'fake', 'unsupported', 'no images')
     @staticmethod
@@ -1334,7 +1334,9 @@ class CodexStructuredDispatch(unittest.TestCase):
         self.program = os.path.join(self.temp, "installed-codex")
         self.log = os.path.join(self.temp, "launches.jsonl")
         self.events = os.path.join(self.temp, "events.jsonl")
-        help_text = "\n".join(codex.QUALIFICATION.restrictions)
+        # The help the fake program answers with names the work vector's
+        # own switches, including `-m` for a caller-named model choice.
+        help_text = "\n".join(codex.QUALIFICATION.restrictions + ("-m",))
         with open(self.program, "w", encoding="utf-8") as stream:
             stream.write(
                 "#!" + sys.executable + "\n"
@@ -1351,6 +1353,11 @@ class CodexStructuredDispatch(unittest.TestCase):
                 "    body = sys.stdin.read()\n"
                 "    with open(os.environ['BRIDGE_FAKE_CODEX_LOG'], 'a') as out:\n"
                 "        out.write(json.dumps({'argv': args, 'body': body}) + '\\n')\n"
+                "    rollout = os.environ.get('BRIDGE_FAKE_CODEX_ROLLOUT')\n"
+                "    if rollout:\n"
+                "        os.makedirs(os.path.dirname(rollout), exist_ok=True)\n"
+                "        with open(rollout, 'w', encoding='utf-8') as stream:\n"
+                "            stream.write(json.dumps({'type': 'turn_context', 'payload': {'model': os.environ['BRIDGE_FAKE_CODEX_MODEL'], 'effort': os.environ['BRIDGE_FAKE_CODEX_EFFORT']}}) + '\\n')\n"
                 "    if os.environ.get('BRIDGE_FAKE_CODEX_WARNINGS'):\n"
                 "        sys.stderr.write('unrelated startup warning\\n' * 2000)\n"
                 "    source = os.environ.get('BRIDGE_FAKE_CODEX_EVENTS')\n"
@@ -1376,6 +1383,9 @@ class CodexStructuredDispatch(unittest.TestCase):
                 "BRIDGE_FAKE_CODEX_EVENTS": "",
                 "BRIDGE_FAKE_CODEX_WARNINGS": "",
                 "BRIDGE_FAKE_CODEX_EXIT": "0",
+                "BRIDGE_FAKE_CODEX_ROLLOUT": "",
+                "BRIDGE_FAKE_CODEX_MODEL": "",
+                "BRIDGE_FAKE_CODEX_EFFORT": "",
             },
         )
         patcher.start()
@@ -1576,6 +1586,77 @@ class CodexStructuredDispatch(unittest.TestCase):
         self.assertEqual(caught.exception.failure, Failure.PEER_FAILURE)
         self.assertNotIn("PRIVATE REQUEST", caught.exception.detail)
         self.assertEqual(os.listdir(session.messages_dir(session_dir)), ["0001-initiator-to-peer.md"])
+
+    def test_the_saved_reply_reports_requested_and_recorded_model_and_effort(self):
+        """A named model and effort, and Codex's own session file, in one reply.
+
+        The fake codex receives the caller's named choices on `-m` and one
+        `-c model_reasoning_effort=` override exactly as named, emits
+        `thread.started` with the thread id, and writes the rollout session
+        file whose `turn_context` names the model and effort Codex actually
+        recorded. The saved reply must show the requested values and the
+        recorded ones beside each other, and the recorded halves must come
+        from the session file alone: they differ from the request here, and
+        neither half of the report is inferred from it. The choices report
+        rides in the reply of either session format - Format 2 is the
+        original courier shape, still the default - and the Format 2 reply
+        grows nothing beyond it: no `Answers:` line, and no attribution
+        lines a choices report does not carry.
+        """
+        rollout = os.path.join(
+            self.codex_home, "sessions", "2026-10-19",
+            "rollout-2026-10-19T09-00-00-thread-choices.jsonl",
+        )
+        os.environ["BRIDGE_FAKE_CODEX_ROLLOUT"] = rollout
+        os.environ["BRIDGE_FAKE_CODEX_MODEL"] = "recorded-model"
+        os.environ["BRIDGE_FAKE_CODEX_EFFORT"] = "recorded-effort"
+        self._stream([
+            {"type": "thread.started", "thread_id": "thread-choices"},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {
+                "id": "final", "type": "agent_message",
+                "text": "The reported answer.\n"}},
+            {"type": "turn.completed"},
+        ])
+        for name, mode in (("format-three", "work"), ("format-two", None)):
+            with self.subTest(session=name):
+                result = runner.run_turn(
+                    self._session("choices-report-" + name, mode),
+                    "Name one model and one effort.\n",
+                    model="requested-model",
+                    effort="requested-effort",
+                )
+                with open(result.response_path, encoding="utf-8") as stream:
+                    reply = stream.read()
+                header = reply.partition("\n## Body")[0]
+                self.assertIn("Model: recorded-model\n", header)
+                self.assertIn("Effort: recorded-effort\n", header)
+                self.assertIn("Requested-Model: requested-model\n", header)
+                self.assertIn("Requested-Effort: requested-effort\n", header)
+                self.assertNotIn("\nModel: requested-model\n", header)
+                self.assertNotIn("\nEffort: requested-effort\n", header)
+                self.assertEqual(self._body(result), "The reported answer.\n")
+                if mode is None:
+                    self.assertEqual(
+                        reply,
+                        "# Message 0002\nFrom: codex\nTo: vibe-coder\n"
+                        "Model: recorded-model\nEffort: recorded-effort\n"
+                        "Requested-Model: requested-model\n"
+                        "Requested-Effort: requested-effort\n"
+                        "\n## Body\n\nThe reported answer.\n",
+                    )
+
+        # Each turn launched codex once, with the named choices on the
+        # target's own switches exactly as named.
+        with open(self.log, encoding="utf-8") as stream:
+            launches = [json.loads(line) for line in stream]
+        self.assertEqual(len(launches), 2)
+        for launch in launches:
+            pairs = list(zip(launch["argv"], launch["argv"][1:]))
+            self.assertIn(("-m", "requested-model"), pairs)
+            self.assertIn(
+                ("-c", "model_reasoning_effort=requested-effort"), pairs
+            )
 
 
 class OrdinaryPermissionWorkVectors(unittest.TestCase):

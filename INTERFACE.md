@@ -1,4 +1,4 @@
-# Agent Bridge — Courier and Work-Mode Interface
+# Ora Agent Bridge — Courier and Work-Mode Interface
 
 **Status:** Release 1 courier contract, approved September 3, 2026. All six targets have passed real calls on macOS 26 arm64, including Qwen's corrected stream transport. The exercised CLI versions are listed in the README. The opt-in working mode (Format 3 sessions, JSON readiness, lifecycle events, per-connector work vectors and image routes) was added September 27, 2026 under the authorized work-mode plan; its live qualification evidence is in section 8a. Qualification does not by itself complete the release finish line in section 12.
 
@@ -10,9 +10,9 @@ SPDX-License-Identifier: CC0-1.0
 
 ## 1. Purpose and boundary
 
-Agent Bridge is a standalone one-to-many Markdown courier. Any application or coding-agent harness may initiate a session and make one bounded call at a time to a supported target whose vendor CLI is installed, signed in, and qualified.
+Ora Agent Bridge is a standalone one-to-many Markdown courier. Any application or coding-agent harness may initiate a session and make one bounded call at a time to a supported target whose vendor CLI is installed, signed in, and qualified.
 
-Agent Bridge owns:
+Ora Agent Bridge owns:
 
 - target readiness;
 - one request and one response per foreground call;
@@ -23,13 +23,13 @@ Agent Bridge owns:
 
 It does not plan, coordinate, choose targets, combine answers, schedule work, judge a response, run a Programming Loop, approve anything, manage Git, or enforce an application workflow. It has no model API layer, database, daemon, task ledger, plugin discovery, application registry, or dynamic connector registry.
 
-Applications own the meaning of what they send. Ora Vibe Coder or any other caller may put plans, commits, reviews, decisions, or state in the Markdown body. To Agent Bridge those remain inert text.
+Applications own the meaning of what they send. Ora Vibe Coder or any other caller may put plans, commits, reviews, decisions, or state in the Markdown body. To Ora Agent Bridge those remain inert text.
 
 ### Same-user trust boundary
 
-Agent Bridge treats each target CLI as a trusted program running under the user's operating-system account. It does not claim to stop that program reading other files the account can read, and is not a confidentiality boundary against a malicious harness or prompt injection.
+Ora Agent Bridge treats each target CLI as a trusted program running under the user's operating-system account. It does not claim to stop that program reading other files the account can read, and is not a confidentiality boundary against a malicious harness or prompt injection.
 
-A target given a project may load its `AGENTS.md`, `CLAUDE.md`, or equivalent instructions. Agent Bridge does not suppress them. Target CLIs may also keep plaintext transcripts; Agent Bridge neither deletes nor hides them.
+A target given a project may load its `AGENTS.md`, `CLAUDE.md`, or equivalent instructions. Ora Agent Bridge does not suppress them. Target CLIs may also keep plaintext transcripts; Ora Agent Bridge neither deletes nor hides them.
 
 Repository instructions and message text cannot alter the connector's fixed invocation, grant Bridge authority, or become a Bridge command. Users should call only harnesses they trust and should not use Bridge when same-user read access is unacceptable.
 
@@ -55,7 +55,7 @@ Qwen's connector internally encodes that body as one stream-JSON user frame whos
 Adapters start Bridge as a fixed vector:
 
 ```text
-python3 -m bridge <command> ...
+python3 -m ora_agent_bridge <command> ...
 ```
 
 ---
@@ -97,10 +97,10 @@ One session has one initiator and one target. An application reaches several tar
 ## 4. Commands
 
 ```text
-python3 -m bridge check --peer <target-id>
+python3 -m ora_agent_bridge check --peer <target-id>
                  [--mode review|work] [--work-permission full-access] [--json]
 
-python3 -m bridge run --session <session-directory>
+python3 -m ora_agent_bridge run --session <session-directory>
                  [--timeout <seconds> | --no-timeout]
                  [--max-steps <positive-integer>]
                  [--require-model <provider/model>]
@@ -110,7 +110,7 @@ python3 -m bridge run --session <session-directory>
                  [--attachment <absolute-image-path>]...
                  [--note-ref <id>] [--purpose <label>]
 
-python3 -m bridge record --session <session-directory>
+python3 -m ora_agent_bridge record --session <session-directory>
                     --kind session-create
                     --initiator <label>
                     --peer <target-id>
@@ -118,11 +118,11 @@ python3 -m bridge record --session <session-directory>
                     [--mode review|work]
                     [--access-path <directory>]...
 
-python3 -m bridge record --session <session-directory>
+python3 -m ora_agent_bridge record --session <session-directory>
                     --kind note
 ```
 
-Run these commands from the absolute checkout root. Source installation creates no `agent-bridge` console executable.
+Run these commands from the absolute checkout root. Source installation creates no `ora-agent-bridge` console executable.
 
 Omitting every extended option keeps the original Format 2 behavior byte for byte: the same records, the same stdout, the same review vectors. Each extension below is opt-in.
 
@@ -137,7 +137,7 @@ It runs in a task-owned neutral directory and never touches a real project, inst
 `--json` replaces the prose with exactly one JSON object on standard output, one line, no schema version. Success and failure alike produce one object; a failure still exits nonzero.
 
 ```json
-{"peer": "codex", "mode": "work", "bridge_version": "1.4.0", "ready": true,
+{"peer": "codex", "mode": "work", "bridge_version": "1.5.0", "ready": true,
  "command_present": true,
  "executable": "/usr/local/bin/codex", "version": "0.155.1",
  "platform": "Darwin 26 arm64",
@@ -182,9 +182,9 @@ model. The validated identity is preserved rather than discarded: the `finished`
 event carries it as optional `model` and `provider` fields, and a Format 3
 response record carries it as `Model:` and `Provider:` header lines (section 7).
 MiniMax's JSON mode is today the only fixed output route that reports identity;
-the other five connectors' outputs carry none, so their events and records never
-grow the fields. Omitting both controls preserves the existing one-step
-plain-text call, which reports no identity.
+the other five connectors' outputs carry none, so this identity reaches neither
+their events nor their records. Omitting both controls preserves the existing
+one-step plain-text call, which reports no identity.
 In a work session, `--max-steps` is forwarded when given and omitted otherwise,
 so the review-only one-step assumption does not apply to work.
 
@@ -202,7 +202,14 @@ own reported failure, carried out with its reason and next action, never a
 fallback to another model. The switch a named choice needs is proven present
 like any other switch the call uses, and the choices each tool documents are
 readiness facts (the `model_switch` and `effort_switch` fields above),
-gathered without a model call.
+gathered without a model call. For Codex, the choices are also reported back:
+after the call, the connector takes the thread id from the `thread.started`
+event, reads the `model` and `effort` from the `turn_context` line of Codex's
+own session file for that thread (under the `sessions` directory of the Codex
+home, `CODEX_HOME` when set, `~/.codex` otherwise), and the saved reply of
+either session format shows the values requested, when any, and the values
+Codex recorded. If the file or the values cannot be read, the reply says they
+were not reported; they are never inferred from the request.
 
 `run` has no deadline for ordinary work: it waits until the target answers, the target fails, or the caller stops the run, and readiness checks keep a bounded deadline of their own. `--timeout <seconds>` is a bounded wait, not a kill: when it ends, the command returns control with the target still running and reports the retained evidence (the session and published request, the peer's process and any session reference it printed, and sanitized partial output), exiting nonzero. In ordinary mode that report goes to standard error; with `--events-jsonl` the same evidence arrives as fields of the final `finished` event on standard output (section 4b). `--no-timeout` names the default behavior explicitly and cannot be combined with `--timeout`. Cleanup has a separate bounded grace period. On Windows a retained or detached target ends when the owning Bridge process exits; macOS and Linux are unaffected. There is no retry.
 
@@ -250,7 +257,7 @@ With `--events-jsonl`, standard output carries one JSON object per line — life
  "warnings": ["...the same warnings standard error carried..."]}
 ```
 
-A heartbeat means Bridge is alive and can report whether its child process is still running; it is not progress and carries no percentages. Heartbeats arrive while prerequisite probes or the peer call are waiting (`phase` says which), about every 30 seconds; ordinary waiting has no deadline. The final `finished` event carries `outcome` (`success`, `failure`, `stopped`, or `pending` — the last when a bounded wait returned control with the target still running), `request_path` and `response_path` when published, the warnings, and — for `failure` — a plain `reason` and `next_action`; internal exception names stay internal. Each time a bounded wait ends with the target still running, a `wait_expired` event (`phase` `peer-call`) is emitted, and the `pending` `finished` event carries the same retained evidence fields: `session_dir`, `request_on_disk`, `peer_pid`, and `peer_running`, with `peer_session`, `stdout_progress`, `stderr_progress`, `elapsed_seconds` (measured from the peer call's start), and `capture_paths` (the retained capture files) present when there is something to report. A `success` event may additionally carry `model` and `provider` when the target's own structured output reported the identity that answered — MiniMax's `--require-model` JSON mode is the one such route today — and both fields are absent when it did not, never empty strings; they state what the tool reported, never a Bridge selection. A `success` event follows durable response publication. A failed call still exits nonzero. If the event pipe breaks, the turn runs on and its records decide the truth: a broken pipe can never turn an unfinished call into a reported success.
+A heartbeat means Bridge is alive and can report whether its child process is still running; it is not progress and carries no percentages. Heartbeats arrive while prerequisite probes or the peer call are waiting (`phase` says which), about every 30 seconds; ordinary waiting has no deadline. The final `finished` event carries `outcome` (`success`, `failure`, `stopped`, or `pending` — the last when a bounded wait returned control with the target still running), `request_path` and `response_path` when published, the warnings, and — for `failure` — a plain `reason` and `next_action`; internal exception names stay internal. Each time a bounded wait ends with the target still running, a `wait_expired` event (`phase` `peer-call`) is emitted, and the `pending` `finished` event carries the same retained evidence fields: `session_dir`, `request_on_disk`, `peer_pid`, and `peer_running`, with `peer_session`, `stdout_progress`, `stderr_progress`, `elapsed_seconds` (measured from the peer call's start), and `capture_paths` (the retained capture files) present when there is something to report. A `success` event may additionally carry `model` and `provider` when the target's own structured output reported the identity that answered — MiniMax's `--require-model` JSON mode and Codex's session-file reading are the two such routes today — and both fields are absent when it did not, never empty strings; they state what the tool reported, never a Bridge selection. For Codex the model is what its own session file recorded for the call, or the plain words `not reported` when it could not be read. A `success` event follows durable response publication. A failed call still exits nonzero. If the event pipe breaks, the turn runs on and its records decide the truth: a broken pipe can never turn an unfinished call into a reported success.
 
 Stop signals, `--timeout` or `--no-timeout`, interruption, and cleanup behave exactly as for any other run; there is no separate cancellation daemon or command service.
 
@@ -345,7 +352,7 @@ To: claude
 <request copied unchanged>
 ```
 
-Response (Format 2, unchanged):
+Response (Format 2):
 
 ```markdown
 # Message 0002
@@ -398,7 +405,7 @@ Provider: minimax
 <final answer copied unchanged>
 ```
 
-`Note-Ref:` and `Purpose:` appear once each when given; `Attachment:` appears once per attached file; `Answers:` carries the request's four-digit sequence. `Model:` and `Provider:` carry the exact strings the tool reported for the call — MiniMax's `--require-model` JSON mode is the one route today — and each appears only when that half was reported, never as an empty placeholder; a Format 2 response never carries them, and its shape is unchanged. None of it is appended to or read from the body, which stays byte-exact under `## Body`.
+`Note-Ref:` and `Purpose:` appear once each when given; `Attachment:` appears once per attached file; `Answers:` carries the request's four-digit sequence. `Model:` and `Provider:` carry the exact strings the tool reported for the call — MiniMax's `--require-model` JSON mode is the one route today — and each appears only when that half was reported, never as an empty placeholder; this provider attribution stays a Format 3 record line, so a Format 2 response never carries it and its shape is unchanged by it. A Codex response additionally reports the choices of the call, in either session format — Format 2 as Format 3: `Model:` and `Effort:` carry what Codex itself recorded for the thread the call started (read from the `turn_context` line of its session file), saying `not reported` for a half that could not be read, and `Requested-Model:` and `Requested-Effort:` appear when the caller named a choice for that call, so the record shows the values requested and the values Codex recorded without either being inferred from the other. None of it is appended to or read from the body, which stays byte-exact under `## Body`.
 
 Neutral note:
 
@@ -422,7 +429,7 @@ A caller may read everything it needs from the retained records alone, in plain 
 
 - From `SESSION.md`: the session's working `Mode:` and every declared `Access-Path:` directory, beside the immutable initiator, target, and project.
 - From each request file: its sequence in the title line, its exact body below `## Body` (byte-exact, never modified), and its `Note-Ref:`, `Purpose:`, and `Attachment:` header lines when the caller supplied them.
-- From each response file: its path, its body below `## Body`, the request sequence it `Answers:`, and the `Model:` and `Provider:` lines the tool's own output reported for that call, when it reported an identity at all.
+- From each response file: its path, its body below `## Body`, the request sequence it `Answers:`, the `Model:` and `Provider:` lines the tool's own output reported for that call, when it reported an identity at all, and — for Codex — the `Effort:` and `Requested-Model:`/`Requested-Effort:` lines of its choices report, which rides in the reply of either session format.
 
 Headers are always the block between the title line and the first blank line; everything below `## Body` is inert text. Bridge owns this surface and will keep it readable.
 

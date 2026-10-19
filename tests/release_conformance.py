@@ -38,11 +38,11 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from bridge import BRIDGE_FORMAT, cli, connectors, session  # noqa: E402
-from bridge.connectors import PeerCommand  # noqa: E402
-from bridge.errors import BridgeError, Failure  # noqa: E402
-from bridge.locking import session_lock  # noqa: E402
-from bridge.peer import Deadline  # noqa: E402
+from ora_agent_bridge import BRIDGE_FORMAT, cli, connectors, session  # noqa: E402
+from ora_agent_bridge.connectors import PeerCommand  # noqa: E402
+from ora_agent_bridge.errors import BridgeError, Failure  # noqa: E402
+from ora_agent_bridge.locking import session_lock  # noqa: E402
+from ora_agent_bridge.peer import Deadline  # noqa: E402
 
 TARGETS = ("codex", "claude", "zcode", "hermes", "minimax", "qwen")
 ADAPTERS = TARGETS
@@ -141,7 +141,7 @@ def _command_options(parser: argparse.ArgumentParser) -> Dict[str, set]:
 
 
 def _literal_switches() -> Dict[str, str]:
-    path = os.path.join(REPO_ROOT, "bridge", "connectors.py")
+    path = os.path.join(REPO_ROOT, "ora_agent_bridge", "connectors.py")
     tree = ast.parse(_read(path), filename=path)
     switch = next(
         (
@@ -151,7 +151,7 @@ def _literal_switches() -> Dict[str, str]:
         ),
         None,
     )
-    _require(switch is not None, "bridge.connectors has no literal _switch")
+    _require(switch is not None, "ora_agent_bridge.connectors has no literal _switch")
     found = {}
     for node in switch.body:
         if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
@@ -212,8 +212,8 @@ def _inspect_adapter(name: str) -> None:
         "{0} does not expose the neutral note operation".format(path),
     )
     _require(
-        "python3 -m bridge check --peer" in text
-        and "python3 -m bridge run --session" in text,
+        "python3 -m ora_agent_bridge check --peer" in text
+        and "python3 -m ora_agent_bridge run --session" in text,
         "{0} lacks readiness or courier commands".format(path),
     )
     _require(
@@ -281,10 +281,10 @@ def _inspect_adapter(name: str) -> None:
     _require(commands, "{0} has no shared Bridge invocation".format(path))
     for command in commands:
         _require(
-            command.startswith("python3 -m bridge "),
+            command.startswith("python3 -m ora_agent_bridge "),
             "{0} invokes an alternate Python module".format(path),
         )
-        operation = command[len("python3 -m bridge ") :].split(None, 1)[0]
+        operation = command[len("python3 -m ora_agent_bridge ") :].split(None, 1)[0]
         _require(
             operation in {"check", "record", "run"},
             "{0} uses unsupported operation {1}".format(path, operation),
@@ -318,7 +318,7 @@ def inspect() -> None:
         "the connector resolver is not one literal branch per fixed target",
     )
 
-    bridge_dir = os.path.join(REPO_ROOT, "bridge")
+    bridge_dir = os.path.join(REPO_ROOT, "ora_agent_bridge")
     modules = {name for name in os.listdir(bridge_dir) if name.endswith(".py")}
     _require(
         modules == PRODUCTION_MODULES,
@@ -816,7 +816,7 @@ def _work_vector(peer: str, cwd: str, docs: str, image: str) -> str:
             "Claude work vector carried a review-only restriction or flag",
         )
     elif peer == "zcode":
-        from bridge import zcode
+        from ora_agent_bridge import zcode
 
         _require(
             argv[:4] == (argv[0], argv[1], "--mode", "edit")
@@ -900,7 +900,7 @@ def _restriction_vector(peer: str, cwd: str) -> str:
             "Codex production restrictions or standard-input transport changed",
         )
     elif peer == "claude":
-        from bridge import claude
+        from ora_agent_bridge import claude
 
         _require(
             command.argv[1:]
@@ -919,7 +919,7 @@ def _restriction_vector(peer: str, cwd: str) -> str:
             "Claude production restrictions or standard-input transport changed",
         )
     elif peer == "zcode":
-        from bridge import zcode
+        from ora_agent_bridge import zcode
 
         _require(
             command.argv[-2:] == zcode.OUTPUT_FORMAT
@@ -929,7 +929,7 @@ def _restriction_vector(peer: str, cwd: str) -> str:
             "ZCode production deny list or bound-option transport changed",
         )
     elif peer == "hermes":
-        from bridge import hermes
+        from ora_agent_bridge import hermes
 
         _require(
             command.argv[1:] == ("--safe-mode", "--toolsets", hermes.TOOLSET)
@@ -961,7 +961,7 @@ def _restriction_vector(peer: str, cwd: str) -> str:
             "MiniMax courier vector or standard-input transport changed",
         )
     else:
-        from bridge import qwen
+        from ora_agent_bridge import qwen
 
         qwen_environment = dict(command.env)
         _require(

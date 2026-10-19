@@ -267,7 +267,7 @@ def publish(path: str, text: str) -> str:
     Within that cover a stop is deferred - written down rather than raised -
     for the whole life of the file, and exactly one window is opened where it
     raises where it lands: the stretch that fills the file in and renames it.
-    This is the same arrangement as `run_bounded` in `bridge.peer`, and for the
+    This is the same arrangement as `run_bounded` in `ora_agent_bridge.peer`, and for the
     same reason. Making the name is deferred because until there is a name the
     handling above would have nothing to clear away, and the handling itself is
     deferred because a second stop landing in the middle of it would abandon
@@ -492,6 +492,9 @@ def peer_to_initiator_text(
     answers: Optional[int] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    effort: Optional[str] = None,
+    requested_model: Optional[str] = None,
+    requested_effort: Optional[str] = None,
 ) -> str:
     """A peer's final answer, copied through unchanged.
 
@@ -499,16 +502,30 @@ def peer_to_initiator_text(
     reading the record can pair them without guessing. When the target's own
     structured output reported which model and provider answered, those two
     exact single-line strings ride along as `Model:` and `Provider:` header
-    lines - present only when the tool reported them, never as empty
-    placeholders - while the body below `## Body` stays byte-exact.
+    lines of a Format 3 response - present only when the tool reported them,
+    never as empty placeholders - while the body below `## Body` stays
+    byte-exact. A connector that reads the model and effort the tool recorded
+    for the call adds `Effort:` beside `Model:` and the values the caller
+    requested for that call as `Requested-Model:` and `Requested-Effort:`
+    lines; that choices report rides in the reply of either session format,
+    so a caller reading either record shape sees both halves of the exchange
+    without either being inferred from the other.
     """
     header_lines = ["From: {0}".format(peer), "To: {0}".format(initiator)]
     if answers is not None:
         header_lines.append("Answers: {0}".format(format_sequence(answers)))
     if model is not None:
         header_lines.append("Model: {0}".format(model))
+    if effort is not None:
+        header_lines.append("Effort: {0}".format(effort))
     if provider is not None:
         header_lines.append("Provider: {0}".format(provider))
+    if requested_model is not None:
+        header_lines.append("Requested-Model: {0}".format(requested_model))
+    if requested_effort is not None:
+        header_lines.append(
+            "Requested-Effort: {0}".format(requested_effort)
+        )
     return _compose(
         "# Message {0}".format(format_sequence(sequence)), header_lines, body
     )

@@ -70,13 +70,13 @@ INPUT_WARNING = (
     "unescaped @ references before the model in both text and stream-json "
     "headless input. It may alter or replace the effective prompt, inject "
     "readable file or resource content, fail during preprocessing, or "
-    "complete a command without a model call. Agent Bridge disables the "
+    "complete a command without a model call. Ora Agent Bridge disables the "
     "pre-model command families that can report externally, persist or import "
     "user configuration, update the CLI, write diagnostics, or invoke "
     "installer rollback: /bug, /config, /update, /import-config, /language, /effort, "
     "/model, and /doctor. Other recognized slash-command preprocessing "
     "remains enabled. Safe mode does not disable it and no lossless raw "
-    "escape or switch exists. Agent Bridge "
+    "escape or switch exists. Ora Agent Bridge "
     "records and passes the original request unchanged, but preprocessing "
     "happens before --max-tool-calls=0, so that budget does not stop it."
 )
@@ -84,7 +84,7 @@ INPUT_WARNING = (
 BOUNDARY_WARNING = (
     "Qwen Code is courier-only and receives a task-owned neutral directory. "
     "--safe-mode drops ambient context, hooks, extensions, MCP servers, custom "
-    "subagents, permission rules, and memory features. Agent Bridge clears "
+    "subagents, permission rules, and memory features. Ora Agent Bridge clears "
     "inherited startup-argument overrides, SANDBOX, and the Qwen sandbox proxy "
     "command, pins QWEN_SANDBOX=sandbox-exec and the restrictive-open profile, "
     "and disables browser launches. Safe mode still loads settings and .env "
@@ -101,7 +101,7 @@ BOUNDARY_WARNING = (
     "QWEN_HOME remains visible so the user's existing authentication and "
     "provider selection can work, and live authentication cannot be confirmed "
     "without the bounded model call. The configured model-provider connection "
-    "and same-user CLI read access remain outside Agent Bridge confinement."
+    "and same-user CLI read access remain outside Ora Agent Bridge confinement."
 )
 
 #: What this connector offers beyond its restricted review call: nothing, and

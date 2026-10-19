@@ -1,7 +1,7 @@
 """Calling Claude Code with its strongest practical read-only posture, and its normal work posture.
 
 Claude Code is Anthropic's own command-line program for its coding agent. This
-module is the whole of what Agent Bridge knows about it: which program to start,
+module is the whole of what Ora Agent Bridge knows about it: which program to start,
 which switches must be on it, and how to tell - without spending a model turn -
 whether starting it would work at all.
 
@@ -55,7 +55,7 @@ overlap.
 Five switches are deliberately never passed. `--dangerously-skip-permissions`
 and `--allow-dangerously-skip-permissions` undo the boundary outright.
 `--continue` and `--resume` would carry a previous conversation into this turn,
-and every call Agent Bridge makes is a fresh one - the session record on disk is
+and every call Ora Agent Bridge makes is a fresh one - the session record on disk is
 the memory, not the harness's own history. `--bare` is the surprising one: it
 sounds like less, but it abandons subscription sign-in and insists on an API
 key instead, which is the opposite of leaving the harness's own authentication
@@ -183,7 +183,7 @@ IMAGE_ROUTE_WARNING = (
 # Claude Code 2.1.251's own policy loader and current official documentation
 # agree on these macOS sources. Restricted mode deliberately keeps the
 # administrator tier, so their presence is a boundary fact rather than a user
-# preference Agent Bridge may override.
+# preference Ora Agent Bridge may override.
 MANAGED_DIRECTORY = "/Library/Application Support/ClaudeCode"
 MANAGED_SETTINGS = os.path.join(MANAGED_DIRECTORY, "managed-settings.json")
 MANAGED_DROP_INS = os.path.join(MANAGED_DIRECTORY, "managed-settings.d")

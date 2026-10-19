@@ -1,4 +1,4 @@
-"""The one internal list of ways an Agent Bridge turn can fail.
+"""The one internal list of ways an Ora Agent Bridge turn can fail.
 
 This enumeration is implementation-internal. It is not a public protocol, not a
 wire format, and not a third-party compatibility surface: nothing outside this
@@ -21,7 +21,7 @@ from typing import Dict, Optional, Tuple
 
 
 class Failure(enum.Enum):
-    """Every way an Agent Bridge turn is allowed to fail."""
+    """Every way an Ora Agent Bridge turn is allowed to fail."""
 
     # Reaching and qualifying a peer harness.
     MISSING_CLI = "MISSING_CLI"
@@ -89,7 +89,7 @@ _GUIDANCE: Dict[Failure, Tuple[str, str]] = {
     ),
     Failure.RESTRICTIONS_UNAVAILABLE: (
         "The peer harness does not offer a switch or one-shot input/output "
-        "mechanic required by Agent Bridge's fixed invocation.",
+        "mechanic required by Ora Agent Bridge's fixed invocation.",
         "Inspect the named missing mechanic and update or correct the harness "
         "before checking it again.",
     ),
@@ -101,7 +101,7 @@ _GUIDANCE: Dict[Failure, Tuple[str, str]] = {
         "until it passes.",
     ),
     Failure.BUSY_SESSION: (
-        "Another Agent Bridge turn is already holding this session's lock.",
+        "Another Ora Agent Bridge turn is already holding this session's lock.",
         "Wait for that turn to finish and run the command again; nothing in the "
         "session was changed.",
     ),
@@ -135,7 +135,7 @@ _GUIDANCE: Dict[Failure, Tuple[str, str]] = {
         "input, and run it again.",
     ),
     Failure.UNKNOWN_HARNESS: (
-        "The named target is not one of the six Agent Bridge knows about.",
+        "The named target is not one of the six Ora Agent Bridge knows about.",
         "Name one of: codex, claude, zcode, hermes, minimax, qwen.",
     ),
     Failure.CONNECTOR_UNAVAILABLE: (

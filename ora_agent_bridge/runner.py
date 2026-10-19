@@ -27,6 +27,15 @@ validation: the finished event carries it as optional `model` and `provider`
 fields, and a Format 3 response record carries it as `Model:` and `Provider:`
 header lines. Each half appears only when the tool reported it, never as an
 empty placeholder, and the published response body stays the final text alone.
+A connector that reads the model and effort the tool recorded for the call
+(Codex, from its own session file) adds `Effort:` beside `Model:` and the
+caller's requested values as `Requested-Model:` and `Requested-Effort:`
+lines, so the record shows what was asked and what the tool recorded -
+including the plain fact that an unreadable value was not reported - without
+either half being inferred from the other. That choices report rides in the
+saved reply of either session format, so a caller reading either record shape
+takes the run's requested and recorded values from it; the provider-only
+attribution above stays a Format 3 record line.
 
 SPDX-License-Identifier: CC0-1.0
 """
@@ -225,7 +234,7 @@ def apply_transport(
         raise BridgeError(
             Failure.USAGE_ERROR,
             detail="the message is {0} bytes and this peer takes it on its "
-            "command line, which Agent Bridge caps at {1} bytes; send a "
+            "command line, which Ora Agent Bridge caps at {1} bytes; send a "
             "shorter message".format(size, COMMAND_LINE_BODY_LIMIT),
         )
     argv = command.argv + (command.body_argument + body,)
@@ -237,7 +246,7 @@ def apply_transport(
             detail="the message, the command and this environment together "
             "come to {0} bytes, more than the {1} the operating system allows "
             "for starting a program once headroom is kept; send a shorter "
-            "message or start Agent Bridge with a smaller environment".format(
+            "message or start Ora Agent Bridge with a smaller environment".format(
                 used, limit
             ),
         )
@@ -913,8 +922,15 @@ def _turn(
                         detail=_peer_failure_detail(peer_call, command, body),
                     )
                 response = peer_call.stdout
+                # The caller's named choices for this one call, kept before
+                # the reported identity shadows those names below, so a
+                # reply that shows what the tool recorded can show what was
+                # requested beside it.
+                requested_model = model  # type: Optional[str]
+                requested_effort = effort  # type: Optional[str]
                 provider = None  # type: Optional[str]
                 model = None  # type: Optional[str]
+                effort = None  # type: Optional[str]
                 if command.response_parser is not None:
                     try:
                         response = command.response_parser(response)
@@ -930,6 +946,7 @@ def _turn(
                         # after validation.
                         provider = response.provider
                         model = response.model
+                        effort = response.effort
                 if not response.strip():
                     raise BridgeError(
                         Failure.EMPTY_RESPONSE, detail=command.argv[0]
@@ -938,6 +955,19 @@ def _turn(
                 format_three = (
                     record.bridge_format == session_module.FORMAT_3
                 )
+                # A choices report - today Codex's model-and-effort reading -
+                # names what the tool recorded, and the same report names
+                # what the caller requested, so the record shows both halves
+                # without either being inferred from the other. It rides in
+                # the saved reply of either format, because a caller reading
+                # either record shape owns the run's requested and recorded
+                # values. A tool that reports no choices keeps its reply
+                # unchanged even when the caller named a choice, and a
+                # provider-only attribution keeps its `Model:`/`Provider:`
+                # record lines Format 3 only, so a Format 2 reply from such
+                # a tool stays byte-unchanged.
+                reported_choices = effort is not None
+                carries_choices = format_three or reported_choices
                 response_sequence = session_module.next_sequence(session_dir)
                 response_path = session_module.publish(
                     session_module.message_path(
@@ -953,8 +983,19 @@ def _turn(
                         answers=(
                             request_sequence if format_three else None
                         ),
-                        model=model if format_three else None,
+                        model=model if carries_choices else None,
                         provider=provider if format_three else None,
+                        effort=effort,
+                        requested_model=(
+                            requested_model
+                            if reported_choices
+                            else None
+                        ),
+                        requested_effort=(
+                            requested_effort
+                            if reported_choices
+                            else None
+                        ),
                     ),
                 )
     except SignalStop as stopped:

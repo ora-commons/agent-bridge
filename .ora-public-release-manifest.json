@@ -1,0 +1,165 @@
+{
+  "files": [
+    {
+      "executable": false,
+      "path": ".gitignore",
+      "sha256": "862263fa1f46c20f0d1e4dac5ffcc75abd55c08211b2c3864c5f8764b9d87793"
+    },
+    {
+      "executable": false,
+      "path": "INTERFACE.md",
+      "sha256": "ed7366ffa05d582213f8fb81e50506ba3de14399e02cd837ad9776155c560194"
+    },
+    {
+      "executable": false,
+      "path": "LICENSE",
+      "sha256": "1ac7ebc3bd469b4e49b592a5e4d03daed4455a31df4e6980ea5900335aaff4f1"
+    },
+    {
+      "executable": false,
+      "path": "NOTICE",
+      "sha256": "b4f36bfa8473f8013872648e1bebcbbaab5f7450ce4437dc8d47d71cf8849193"
+    },
+    {
+      "executable": false,
+      "path": "README.md",
+      "sha256": "ad603fb1f65c8ffc1e07ef9a87779b56a3080c44e7495f99d3a471ef50f54e61"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/__init__.py",
+      "sha256": "5c341c55fe0e8cffede01278ac6fb3ac261e9d208703dc30b37df091bf547184"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/__main__.py",
+      "sha256": "291b2e59f1dc8d272ed40d2d653fcbe98da22d0411b58b27b912ac4d025ea7a8"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/claude.py",
+      "sha256": "9320daf6fee136ce6fa0779282bae4277cb4da4e1e877266f73906ac06d5b8e2"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/cli.py",
+      "sha256": "6d939a1972940dbd00c619b11c1404872eea86b1ccff1a6b637922921c3c2ee0"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/codex.py",
+      "sha256": "38d5b286a29678eb77864335cd56cabce0a05d739dbafa123bd47bd45a5528c0"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/connectors.py",
+      "sha256": "82208282f0b0a54f25802d661776ce92cc9a9f8ddd3e2c49a216a0532d0201d1"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/errors.py",
+      "sha256": "421659d0041aa6565a90cae63581d5c9774a5cc882444affe0fdd2133013c9b3"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/hermes.py",
+      "sha256": "5b7982d5f73559406b61c3271ed5430bba564825d2e6067b601124b662b87f4c"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/locking.py",
+      "sha256": "45cf69de2575d616aa1d35dd3463ab1a9a647031b33b33dd9170de103dac18d0"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/minimax.py",
+      "sha256": "d1baaa344702279fab1c35bdc288de61e52634761fc21187ac1b156acd6a8241"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/peer.py",
+      "sha256": "388b3bfcd22cc906f52eb13451d534cd3a398c4961904fcd82f530689863c86a"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/qwen.py",
+      "sha256": "20843676529cd2d733e6b9ab68d2fb9b7bb2bd513a19bfefb19e7bfa8f3fb954"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/record.py",
+      "sha256": "445a50d5e3cf0fc73839a680322ea99b757832921161c1838c6947137348d50f"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/runner.py",
+      "sha256": "cdbda99177ee0e91dfbb07fc9fa3bf845c87e74eb8a36004739752a03c3671ce"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/session.py",
+      "sha256": "1580500f3c804952f1658cdb6e1bdfb8e35b7a2c3b61c6699a80e8f112b3aaac"
+    },
+    {
+      "executable": false,
+      "path": "ora_agent_bridge/zcode.py",
+      "sha256": "24b5773e69a80921250be49ddb53a715456feba5ef5179dad08c5efc142edc4e"
+    },
+    {
+      "executable": false,
+      "path": "packages/claude/SKILL.md",
+      "sha256": "46b6db195bacc5fbf7bd06f8288e686c399bebd28ba83302085d9d2d16a3baf6"
+    },
+    {
+      "executable": false,
+      "path": "packages/codex/SKILL.md",
+      "sha256": "c888c4ef13f1216f27fe032c1f4a0f17ed025bb4f1f4f0aae66a03bcb561c0a9"
+    },
+    {
+      "executable": false,
+      "path": "packages/hermes/SKILL.md",
+      "sha256": "2295812eac93a39e261d173de691966d506382bfcd1131eae7c701a1f248da5d"
+    },
+    {
+      "executable": false,
+      "path": "packages/minimax/SKILL.md",
+      "sha256": "0e6968deb41e0eccac03d0829b95d7d93d4dcdf05843c0ca99b4f57a62d2e774"
+    },
+    {
+      "executable": false,
+      "path": "packages/qwen/SKILL.md",
+      "sha256": "2d2ea641848e5002366d8444700405994c8ed854ff958947197219fa558bce64"
+    },
+    {
+      "executable": false,
+      "path": "packages/zcode/SKILL.md",
+      "sha256": "6604f14cb096cb402b346f1682822abd79c1d67efb94c39a83eb4b9e0a802b49"
+    },
+    {
+      "executable": false,
+      "path": "tests/__init__.py",
+      "sha256": "f6f1c5e792b86748147ab87aa3620ef57407101840b475633e69fa92043f2286"
+    },
+    {
+      "executable": true,
+      "path": "tests/fake_peer.py",
+      "sha256": "58abd7277b1738e056cd0427d4a1acfc06cd47150cbf2ff393273b91700d20cf"
+    },
+    {
+      "executable": false,
+      "path": "tests/release_conformance.py",
+      "sha256": "6e60cd1e07a4ae9a24ca9f645855e15465b347599127daa18a5a450c01701f04"
+    },
+    {
+      "executable": false,
+      "path": "tests/test_fake_peer.py",
+      "sha256": "fbf1532ee3ef6c842436451b31b3c91fa9ffea3b27d21c9af19445dd41d9d53b"
+    },
+    {
+      "executable": false,
+      "path": "tests/test_work_mode.py",
+      "sha256": "de8e350e1c86554cbe774928be2f1b1d3a584d31710e50cf8f65b6f650316c02"
+    }
+  ],
+  "version": 1
+}

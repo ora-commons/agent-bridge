@@ -1,4 +1,4 @@
-# Agent Bridge
+# Ora Agent Bridge
 
 Get a second opinion from the AI coding tools you already use.
 
@@ -6,7 +6,13 @@ Send a focused request from your app or coding assistant to another signed-in
 coding tool, then bring its answer back. Use it to challenge a plan, review
 work, or hand off a bounded task, with a readable record of the exchange.
 
-Agent Bridge is a standalone one-to-many Markdown courier. Any application or
+Ora Agent Bridge is one of the Ora tools; Ora itself is at
+https://ora-ai.app. The other products' pages: Ora AI Boost
+(https://github.com/ora-commons/ora-adversarial-review), Ora Programming Loop
+(https://github.com/ora-commons/ora-programming-loop), and Ora Vibe Coder
+(https://github.com/ora-commons/ora-vibe-coder).
+
+Ora Agent Bridge is a standalone one-to-many Markdown courier. Any application or
 harness can use one shared checkout to make a foreground call to Codex, Claude
 Code, ZCode, Hermes Agent, MiniMax Code, or Qwen Code through its official
 vendor CLI. Bridge does not connect model APIs; an ordinary caller need not
@@ -35,7 +41,12 @@ Bridge owns a deliberately small surface and does it reliably:
 - A limited identity report: where the target's own structured output names
   the model that answered (MiniMax Code with `--require-model`), Bridge
   preserves that tool-reported identity in the finished event and the
-  response record. Bridge never selects or changes a model itself.
+  response record. For Codex, Bridge also reads the model and effort Codex
+  itself recorded for the call from Codex's own session file and reports
+  them in the response record beside the values the caller requested,
+  saying `not reported` when the file or the values cannot be read; they
+  are never inferred from the request. Bridge never selects or changes a
+  model itself.
 
 The six target identifiers are literal: `codex`, `claude`, `zcode`,
 `hermes`, `minimax`, and `qwen`. Only the selected connector is imported or
@@ -137,23 +148,23 @@ no launcher or global configuration.
 ## Get the source
 
 Bridge installs from a public Git checkout. There is no package to install
-and no `agent-bridge` console command; the checkout is the installation:
+and no `ora-agent-bridge` console command; the checkout is the installation:
 
 ```sh
-git clone https://github.com/ora-commons/agent-bridge.git
-cd agent-bridge
-git checkout v1.4.0
+git clone https://github.com/ora-commons/ora-agent-bridge.git
+cd ora-agent-bridge
+git checkout v1.5.0
 ```
 
-`v1.4.0` is this release's tag. Run every Bridge command from the absolute
-checkout root with `python3 -m bridge ...`. These instructions need no
+`v1.5.0` is this release's tag. Run every Bridge command from the absolute
+checkout root with `python3 -m ora_agent_bridge ...`. These instructions need no
 private repository and no personal settings.
 
 ## Identify your version
 
-Open `bridge/__init__.py` in the checkout. The `VERSION = "1.4.0"` line
+Open `ora_agent_bridge/__init__.py` in the checkout. The `VERSION = "1.5.0"` line
 names the release you have. For a clean release checkout, the Git tag you
-selected (`git checkout v1.4.0` above) and that line agree. There is no
+selected (`git checkout v1.5.0` above) and that line agree. There is no
 `--version` command.
 
 ## A complete work-mode walkthrough
@@ -168,7 +179,7 @@ right now (no model call, no project touched):
 
 ```sh
 mkdir -p /tmp/agent-bridge-demo
-python3 -m bridge check --peer codex --mode work
+python3 -m ora_agent_bridge check --peer codex --mode work
 ```
 
 Read the readiness result and any `Warning:` lines. If it fails, resolve
@@ -180,7 +191,7 @@ authentication; `my-app` works for any caller. These fields are immutable
 once created:
 
 ```sh
-python3 -m bridge record \
+python3 -m ora_agent_bridge record \
   --session "$HOME/.agent-bridge/sessions/demo-work" \
   --kind session-create --initiator my-app --peer codex \
   --mode work --project /tmp/agent-bridge-demo <<'MARKDOWN'
@@ -195,7 +206,7 @@ directories. Use a different session for a different target or project.
 Send one self-contained request and wait in the foreground:
 
 ```sh
-python3 -m bridge run \
+python3 -m ora_agent_bridge run \
   --session "$HOME/.agent-bridge/sessions/demo-work" <<'MARKDOWN'
 Create the file /tmp/agent-bridge-demo/bridge-greeting.txt containing
 exactly one line and nothing else:
@@ -258,7 +269,7 @@ and one next action.
 To preserve information without a model call, add a neutral note:
 
 ```sh
-python3 -m bridge record \
+python3 -m ora_agent_bridge record \
   --session "$HOME/.agent-bridge/sessions/demo-work" --kind note <<'MARKDOWN'
 The demo finished; the disposable project can be deleted.
 MARKDOWN
@@ -274,13 +285,13 @@ restricted review answer. Create a session without `--mode` (a Format 2
 session), optionally with `--project` for Codex, Claude Code, or ZCode:
 
 ```sh
-python3 -m bridge record \
+python3 -m ora_agent_bridge record \
   --session "$HOME/.agent-bridge/sessions/first-look" \
   --kind session-create --initiator my-app --peer codex <<'MARKDOWN'
 Trying Agent Bridge for the first time.
 MARKDOWN
 
-python3 -m bridge run --session "$HOME/.agent-bridge/sessions/first-look" <<'MARKDOWN'
+python3 -m ora_agent_bridge run --session "$HOME/.agent-bridge/sessions/first-look" <<'MARKDOWN'
 In one sentence, what is a Markdown courier?
 MARKDOWN
 ```
@@ -334,8 +345,8 @@ directory, never a shell-built command string:
 import subprocess
 
 checked = subprocess.run(
-    ["python3", "-m", "bridge", "check", "--peer", user_selected_target],
-    cwd="/absolute/path/to/agent-bridge",
+    ["python3", "-m", "ora_agent_bridge", "check", "--peer", user_selected_target],
+    cwd="/absolute/path/to/ora-agent-bridge",
     capture_output=True, text=True,
 )
 ```
@@ -356,8 +367,8 @@ failures, send a body, read an answer, and record a note. They are
 guidance, not separate runtimes, and never call each other.
 
 To use one, copy that `SKILL.md` into your coding tool's skills folder by
-hand (for example `~/.claude/skills/agent-bridge/SKILL.md` for Claude
-Code, or `~/.zcode/skills/agent-bridge/SKILL.md` for ZCode, following your
+hand (for example `~/.claude/skills/ora-agent-bridge/SKILL.md` for Claude
+Code, or `~/.zcode/skills/ora-agent-bridge/SKILL.md` for ZCode, following your
 tool's own skill conventions). Skills are copied by hand and never
 synchronized: updating the checkout does not update an installed copy, and
 Bridge never writes into a skills folder. A coding tool used only as a
@@ -391,7 +402,7 @@ human-readable records are still needed.
 ## Report a problem
 
 Report problems at the repository's issue tracker:
-https://github.com/ora-commons/agent-bridge/issues — include the command
+https://github.com/ora-commons/ora-agent-bridge/issues — include the command
 you ran, both output streams, the exit status, and the CLI version.
 Bridge is published as-is, with no dedicated support channel, no
 maintenance commitment, and no compatibility promise; issues are read on a
@@ -406,7 +417,7 @@ current README always describes the current release. A withdrawn release
 is withdrawn from the releases page, but earlier versions remain reachable
 at their existing Git tags, and every published release notes its
 exercised platforms and tools. Check
-https://github.com/ora-commons/agent-bridge/releases before installing to
+https://github.com/ora-commons/ora-agent-bridge/releases before installing to
 see the current version and any correction notes.
 
 ## Safety and warnings
@@ -449,7 +460,7 @@ per-target work and image routes, and the release criteria.
 
 SPDX-License-Identifier: CC0-1.0
 
-First-party Agent Bridge material is dedicated to the public domain under
+First-party Ora Agent Bridge material is dedicated to the public domain under
 [CC0 1.0 Universal](LICENSE). Third-party command-line programs, services,
 accounts, trademarks, configurations, and transcripts are not included in
 that dedication; see [NOTICE](NOTICE).

@@ -1,7 +1,7 @@
 """Calling Codex with its strongest practical read-only posture, and its ordinary work posture.
 
 Codex is OpenAI's own command-line program for its coding agent. This module is
-the whole of what Agent Bridge knows about it: which program to start, which
+the whole of what Ora Agent Bridge knows about it: which program to start, which
 switches must be on it, and how to tell - without spending a model turn -
 whether starting it would work at all.
 
@@ -23,6 +23,17 @@ The prompt travels the other way, on standard input, and the
 lone `-` says so out loud: with no prompt argument Codex would read standard
 input anyway, and naming it is what makes the handover deliberate rather than
 incidental.
+
+**What Codex recorded, reported back.** No vector here passes `--ephemeral`,
+so Codex keeps its own session file for the call, and the `turn_context` line
+of that file names the model and effort the call actually ran with. After a
+successful turn the connector takes the thread id from the `thread.started`
+event, reads that line from the session file for that thread - under the
+`sessions` directory of the same Codex home the posture reading uses - and
+attaches the recorded model and an effort beside it to the answer, so the
+saved reply can show the values requested and the values Codex recorded. When
+the thread was not named, or the file or the values cannot be read, the reply
+says they were not reported; they are never inferred from the request.
 
 **The switches, and why none of them is decoration.**
 
@@ -77,7 +88,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 from . import connectors
 from .errors import BridgeError, Failure
@@ -110,7 +121,7 @@ QUALIFICATION = connectors.Qualification(
 
 WARNING = (
     "--ignore-user-config skips only $CODEX_HOME/config.toml, including any "
-    "model and effort defaults stored there; Agent Bridge supplies no "
+    "model and effort defaults stored there; Ora Agent Bridge supplies no "
     "replacement. Trusted-project .codex/config.toml files and project hooks "
     "or rules, system configuration, managed_config.toml, requirements.toml, "
     "cloud-delivered requirements, macOS MDM preferences, and separately "
@@ -318,13 +329,130 @@ def _work_warning(posture: str, origin: str) -> str:
     )
 
 
+def _codex_home() -> str:
+    """The Codex home this connector already reads: `CODEX_HOME`, else `~/.codex`."""
+    return os.environ.get("CODEX_HOME") or os.path.expanduser(
+        os.path.join("~", ".codex")
+    )
+
+
+def _turn_context_choices(path: str) -> Tuple[Optional[str], Optional[str]]:
+    """The model and effort of the first `turn_context` line, or nothing.
+
+    Codex writes the values a call ran with on the `turn_context` line of the
+    rollout file, either at the top level or inside its `payload` object;
+    both shapes are read, and a line that names neither half contributes
+    nothing. Reading stops at the first `turn_context` line found.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if (
+                    not isinstance(event, dict)
+                    or event.get("type") != "turn_context"
+                ):
+                    continue
+                model = None  # type: Optional[str]
+                effort = None  # type: Optional[str]
+                for holder in (event, event.get("payload")):
+                    if not isinstance(holder, dict):
+                        continue
+                    for name in ("model", "effort"):
+                        value = holder.get(name)
+                        if not isinstance(value, str) or not value:
+                            continue
+                        if name == "model":
+                            model = model or value
+                        else:
+                            effort = effort or value
+                return model, effort
+    except OSError:
+        pass
+    return None, None
+
+
+def _recorded_choices(thread_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """Read the model and effort Codex itself recorded for one thread.
+
+    Codex keeps one rollout file per call, named
+    `rollout-<time>-<thread id>.jsonl` under a date directory of the
+    `sessions` directory in the Codex home. The date and the timestamp are
+    Codex's, not this connector's, so every date directory is scanned for a
+    rollout whose name ends in that thread id, and the first one that
+    supplies a `turn_context` line answers. A thread id names one call, so
+    at most one rollout matches for real. Any failure to list, open, or
+    read is left as an unreadable lookup for the caller to report.
+    """
+    sessions = os.path.join(_codex_home(), "sessions")
+    suffix = "-" + thread_id + ".jsonl"
+    try:
+        days = sorted(os.listdir(sessions))
+    except OSError:
+        return None, None
+    for day in days:
+        day_directory = os.path.join(sessions, day)
+        if not os.path.isdir(day_directory):
+            continue
+        try:
+            names = sorted(os.listdir(day_directory))
+        except OSError:
+            continue
+        for name in names:
+            if not (name.startswith("rollout-") and name.endswith(suffix)):
+                continue
+            model, effort = _turn_context_choices(
+                os.path.join(day_directory, name)
+            )
+            if model is not None or effort is not None:
+                return model, effort
+    return None, None
+
+
+def _attributed(answer: str, events: Sequence[Any]) -> str:
+    """The final text with the model and effort Codex itself recorded.
+
+    The thread id comes from the `thread.started` event of the call's own
+    event stream - never from anything the caller sent - and the recorded
+    values come from Codex's session file for that thread alone. When the
+    thread was not named, or the file or the values cannot be read, each
+    unreadable half carries the plain words `not reported`, so the saved
+    reply says so; no half is ever filled from the request.
+    """
+    thread_id = None  # type: Optional[str]
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") != "thread.started":
+            continue
+        named = event.get("thread_id")
+        if isinstance(named, str) and named:
+            thread_id = named
+        break
+    model = None  # type: Optional[str]
+    effort = None  # type: Optional[str]
+    if thread_id is not None:
+        model, effort = _recorded_choices(thread_id)
+    return connectors.AttributedText(
+        answer,
+        model=model if model is not None else connectors.NOT_REPORTED,
+        effort=effort if effort is not None else connectors.NOT_REPORTED,
+    )
+
+
 def parse_response(output: str) -> str:
     """Read one Codex JSONL turn without treating intermediate work as a reply.
 
     Unknown event and item types are harmless additions to the stream. The
     known completion and failure events still decide whether any final answer
     may be published. Only an agent message completed before the one successful
-    terminal event can supply that answer.
+    terminal event can supply that answer, which is returned with the model
+    and effort Codex recorded for the call's thread attached - or the plain
+    fact that they were not reported.
     """
     try:
         events = [json.loads(line) for line in output.split("\n") if line.strip()]
@@ -400,7 +528,7 @@ def parse_response(output: str) -> str:
         # Codex also emits top-level error notices for recoverable retries,
         # without exposing will_retry in JSONL. The completed turn and the
         # runner's zero-exit check, not an earlier notice, establish success.
-        return answer
+        return _attributed(answer, events)
     detail = (
         "codex did not report a completed turn; no answer was published"
         if not completed else "codex completed without a final agent message"
@@ -527,7 +655,7 @@ def build_command(
     `cwd` is the directory the peer may read - the project named on the command
     line, or the neutral empty directory a turn without a project gets. It comes
     from the command line only. Nothing under a message's `## Body` heading is
-    read anywhere in Agent Bridge, so no text a peer or a plan wrote can name a
+    read anywhere in Ora Agent Bridge, so no text a peer or a plan wrote can name a
     directory here.
 
     A caller-named model or effort passes through on Codex's own documented

@@ -1,17 +1,17 @@
 ---
-name: agent-bridge
-description: Use Agent Bridge from Qwen Code to send one Markdown message to a supported target, report readiness, or add a neutral session note.
+name: ora-agent-bridge
+description: Use Ora Agent Bridge from Qwen Code to send one Markdown message to a supported target, report readiness, or add a neutral session note.
 license: CC0-1.0
 ---
 
-# Agent Bridge
+# Ora Agent Bridge
 
-Agent Bridge is a local courier. It sends one complete Markdown body to one
+Ora Agent Bridge is a local courier. It sends one complete Markdown body to one
 supported target, waits in the foreground, and records the request and final
 answer in a human-readable session folder.
 
 This skill is the Qwen Code adapter. Its initiator label is always `qwen`. It
-uses the same Agent Bridge runtime as every other caller and does not call
+uses the same Ora Agent Bridge runtime as every other caller and does not call
 another adapter. Run its commands with Qwen Code's shell tool, one foreground
 command at a time.
 
@@ -51,20 +51,20 @@ Before the first command, resolve one absolute Bridge root:
 
 1. Use `AGENT_BRIDGE_HOME` when the user has set it.
 2. Otherwise use the repository above this skill when this file is still
-   inside an Agent Bridge checkout.
+   inside an Ora Agent Bridge checkout.
 3. Otherwise use an absolute checkout path the user already supplied.
 
-The root must contain `bridge/__main__.py` and `bridge/cli.py`. If none of those
+The root must contain `ora_agent_bridge/__main__.py` and `ora_agent_bridge/cli.py`. If none of those
 locations qualifies, ask for the checkout's absolute path. Never search other
 adapters or guess from a directory name.
 
 This skill is guidance, not an installer: the source checkout is the Bridge
-installation, and there is no `agent-bridge` console command. Do not change
+installation, and there is no `ora-agent-bridge` console command. Do not change
 Bridge or a vendor CLI during a call; follow the README and preserve records.
 
 Run every command below with that directory as the shell working directory.
 Start it in the foreground as the fixed argument vector beginning
-`python3 -m bridge`; do not wrap it in another program or leave it running in
+`python3 -m ora_agent_bridge`; do not wrap it in another program or leave it running in
 the background. Every session, project, and body-file path supplied to it must
 be absolute.
 
@@ -74,7 +74,7 @@ Use readiness when the user asks whether a target is usable, or before the
 first call when its current state is unknown:
 
 ```text
-python3 -m bridge check --peer <target>
+python3 -m ora_agent_bridge check --peer <target>
 ```
 
 This check makes no model call and touches no project. Report its complete
@@ -96,7 +96,7 @@ session. It should say what the conversation is about. Supply that file on
 standard input to:
 
 ```text
-python3 -m bridge record --session <absolute-session-directory> --kind session-create --initiator qwen --peer <target> [--project <absolute-project-directory>] < /absolute/path/to/session-body.md
+python3 -m ora_agent_bridge record --session <absolute-session-directory> --kind session-create --initiator qwen --peer <target> [--project <absolute-project-directory>] < /absolute/path/to/session-body.md
 ```
 
 Omit `--project` unless the user wants a project-capable target to read that
@@ -117,7 +117,7 @@ Write the body to a task-owned temporary file outside the session and supply it
 on standard input to:
 
 ```text
-python3 -m bridge run --session <absolute-session-directory> [--timeout <seconds>] < /absolute/path/to/outgoing-body.md
+python3 -m ora_agent_bridge run --session <absolute-session-directory> [--timeout <seconds>] < /absolute/path/to/outgoing-body.md
 ```
 
 Before starting, tell the user which target will be called and which session
@@ -141,7 +141,7 @@ target, put the note in a task-owned temporary Markdown file outside the
 session and supply it on standard input to:
 
 ```text
-python3 -m bridge record --session <absolute-session-directory> --kind note < /absolute/path/to/note-body.md
+python3 -m ora_agent_bridge record --session <absolute-session-directory> --kind note < /absolute/path/to/note-body.md
 ```
 
 Delete the temporary body file after the command returns. A note is inert text;

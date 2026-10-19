@@ -28,7 +28,7 @@ or a newly enabled plugin in the middle of real work, with the peer already
 running.
 
 **How the message gets in, and why this connector is the declared exception.**
-Agent Bridge sends the outgoing body on standard input wherever a harness has
+Ora Agent Bridge sends the outgoing body on standard input wherever a harness has
 one. ZCode 0.16.5 has none for a one-shot prompt, and that was established by
 probe, not by reading documentation: `--prompt` with no value is a parse error
 before anything is read; `--prompt -` sends a literal dash, as the model's own
@@ -90,7 +90,7 @@ That last rule is why the plugin check below exists.
 `--cwd <path>` names the working directory, and it is given the very directory
 the process is started in, so the two cannot drift apart. It comes from the
 command line only; nothing under a message's `## Body` heading is read anywhere
-in Agent Bridge.
+in Ora Agent Bridge.
 
 Four switches that `--help` advertises do not exist on 0.16.5: `--settings`,
 `--max-turns`, `--allowed-tools` and `--permission-mode` are each rejected as

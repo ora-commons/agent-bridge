@@ -1,6 +1,6 @@
-"""Agent Bridge core package.
+"""Ora Agent Bridge core package.
 
-Agent Bridge connects coding-agent harnesses through their official callable
+Ora Agent Bridge connects coding-agent harnesses through their official callable
 command-line interfaces. This module exposes the source release and on-disk
 session-format versions. It imports nothing, spawns nothing, and does no work
 when it is imported.
@@ -12,8 +12,8 @@ SPDX-License-Identifier: CC0-1.0
 #: `Bridge-Format:` so a later reader can tell which layout it is looking at.
 BRIDGE_FORMAT = 2
 
-#: Release version of this source tree. This is release 1.4.0.
-VERSION = "1.4.0"
+#: Release version of this source tree. This is release 1.5.0.
+VERSION = "1.5.0"
 
 __version__ = VERSION
 
